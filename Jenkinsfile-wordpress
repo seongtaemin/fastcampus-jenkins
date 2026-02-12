@@ -1,0 +1,165 @@
+pipeline {
+    agent {
+        kubernetes {
+            inheritFrom "gradle:7.6.1-jdk17 kaniko"
+        }
+    }
+
+    environment {
+        // 사용자 설정 반영
+        HARBOR_URL = 'harbor.kolon.local'
+        GITOPS_REPO_URL = 'https://github.com/seongtaemin/fastcampus-jenkins.git'
+        ARGOCD_SERVER = '172.18.229.174:30002'
+        
+        // 프로젝트 및 이미지 설정
+        HARBOR_PROJECT = 'library'
+        APP_NAME = 'wordpress'
+        IMAGE_NAME = "${HARBOR_URL}/${HARBOR_PROJECT}/${APP_NAME}"
+        
+        // SonarQube 설정 (Tool Name)
+        SONAR_SCANNER_HOME = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+        
+        // GitConfig
+        GIT_USER_EMAIL = 'taemni.seong@gmail.com'
+        GIT_USER_NAME = 'seongtaemin'
+    }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo "Initializing pipeline..."
+                    echo "Harbor URL: ${HARBOR_URL}"
+                    echo "ArgoCD Server: ${ARGOCD_SERVER}"
+                    echo "Image: ${IMAGE_NAME}:${env.BUILD_NUMBER}"
+                }
+            }
+        }
+
+        stage('Git Download') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Source Build') {
+            steps {
+                container('gradle') {
+                    sh 'chmod +x gradlew'
+                    sh './gradlew clean build'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                container('gradle') {
+                    withSonarQubeEnv('sonarqube-server') {
+                        sh """
+                        ${env.SONAR_SCANNER_HOME}/bin/sonar-scanner \
+                            -Dsonar.host.url=http://sonarqube:9000 \
+                            -Dsonar.projectKey=${APP_NAME} \
+                            -Dsonar.projectBaseDir=. \
+                            -Dsonar.sources=src/main \
+                            -Dsonar.java.binaries=build/classes
+                        """
+                    }
+                }
+                timeout(time: 1, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                container('kaniko') {
+                    withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                        sh """
+                            echo "{\\"auths\\":{\\"${HARBOR_URL}\\":{\\"username\\":\\"${HARBOR_USER}\\",\\"password\\":\\"${HARBOR_PASSWORD}\\"}}}" > /kaniko/.docker/config.json
+                        """
+                    }
+                    
+                    sh """
+                        /kaniko/executor \
+                        --context `pwd` \
+                        --dockerfile Dockerfile \
+                        --destination ${IMAGE_NAME}:${env.BUILD_NUMBER} \
+                        --insecure \
+                        --skip-tls-verify
+                    """
+                }
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                script {
+                    def userInput = input(
+                        id: 'Deploy', 
+                        message: '배포하시겠습니까?', 
+                        parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: 'Docker Image ID: ' + env.BUILD_NUMBER, name: 'Proceed']
+                        ]
+                    )
+                }
+            }
+        }
+
+        stage('Argo Git Push') {
+            steps {
+                container('gradle') {
+                    withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD')]) {
+                        sh """
+                            git config --global user.email "${GIT_USER_EMAIL}"
+                            git config --global user.name "${GIT_USER_NAME}"
+                            
+                            rm -rf gitops-repo
+                            git clone ${GITOPS_REPO_URL} gitops-repo
+                            
+                            cd gitops-repo/wordpress
+                            
+                            # values.yaml의 tag 값을 현재 빌드 번호로 변경
+                            sed -i 's/tag: ".*"/tag: "${env.BUILD_NUMBER}"/' values.yaml
+                            
+                            git add values.yaml
+                            git commit -m "Update image tag to ${env.BUILD_NUMBER}"
+                            
+                            git push https://${GIT_USER}:${GIT_PASSWORD}@github.com/seongtaemin/fastcampus-jenkins.git HEAD:main
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('ArgoCD Sync') {
+            steps {
+                container('gradle') {
+                    sh """
+                        curl -sSL -o argocd https://${ARGOCD_SERVER}/download/argocd-linux-amd64
+                        chmod +x argocd
+                    """
+
+                    withCredentials([usernamePassword(credentialsId: 'argocd-credentials', usernameVariable: 'ARGO_USER', passwordVariable: 'ARGO_PASSWORD')]) {
+                        sh """
+                            ./argocd login ${ARGOCD_SERVER} \
+                                --username ${ARGO_USER} \
+                                --password ${ARGO_PASSWORD} \
+                                --insecure \
+                                --grpc-web
+
+                            ./argocd app sync ${APP_NAME} \
+                                --insecure \
+                                --grpc-web
+                                
+                            ./argocd app wait ${APP_NAME} \
+                                --health \
+                                --insecure \
+                                --grpc-web
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
