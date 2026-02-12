@@ -1,143 +1,165 @@
 pipeline {
-    // 어떠한 에이전트에서도 실행 가능함을 표현
-    agent any
+    agent {
+        kubernetes {
+            inheritFrom "gradle:7.6.1-jdk17 kaniko"
+        }
+    }
 
     environment {
-        // jenkins 가 관리하는 도구의 위치는 이와 같이 환경 변수로 저장 가능
+        // 사용자 설정 반영
+        HARBOR_URL = 'harbor.kolon.local'
+        GITOPS_REPO_URL = 'https://github.com/seongtaemin/fastcampus-jenkins.git'
+        ARGOCD_SERVER = '172.18.229.174:30002'
+        
+        // 프로젝트 및 이미지 설정
+        HARBOR_PROJECT = 'library'
+        APP_NAME = 'wordpress'
+        IMAGE_NAME = "${HARBOR_URL}/${HARBOR_PROJECT}/${APP_NAME}"
+        
+        // SonarQube 설정 (Tool Name)
         SONAR_SCANNER_HOME = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+        
+        // GitConfig
+        GIT_USER_EMAIL = 'jenkins@fastcampus.com'
+        GIT_USER_NAME = 'jenkins-bot'
     }
 
-    parameters {
-        booleanParam(defaultValue: isDeploymentNecessary(), description: '배포 포함 여부', name: 'DEPLOY_ENABLED')
-    }
-
-    options {
-        buildDiscarder logRotator(artifactDaysToKeepStr: '', artifactNumToKeepStr: '', daysToKeepStr: '5', numToKeepStr: '5')
-        githubProjectProperty(displayName: '', projectUrlStr: 'https://github.com/fastcampus-jenkins/fastcampus-jenkins')
-        // 디폴트 checkout skip 설정 제거
-    }
-
-      triggers {
-            issueCommentTrigger('.*(test this|build this|deploy this).*')
-      }
-      
-  
-    // stages > stage > steps 순으로 구성
     stages {
-        stage('Build') {
+        stage('Initialize') {
             steps {
-                // withGradle 을 하면, Gradle 로그를 해석
-                dir("projects/spring-app") {
-                    withGradle {
-                        sh "./gradlew build"
-                    }
+                script {
+                    echo "Initializing pipeline..."
+                    echo "Harbor URL: ${HARBOR_URL}"
+                    echo "ArgoCD Server: ${ARGOCD_SERVER}"
+                    echo "Image: ${IMAGE_NAME}:${env.BUILD_NUMBER}"
                 }
             }
         }
 
-        stage('SonarScanner') {
-            when {
-                  expression {
-                      return isSonarQubeNecessary()
-                  }
-              }
+        stage('Git Download') {
             steps {
-                // sonarqube 환경하에서, 실행
-                withSonarQubeEnv("sonarqube-server") {
-                    sh """
-                    ${env.SONAR_SCANNER_HOME}/bin/sonar-scanner \
-                        -Dsonar.host.url=http://sonarqube:9000 \
-                        -Dsonar.projectKey=sample \
-                        -Dsonar.projectBaseDir=${WORKSPACE}/projects/spring-app
-                  """
+                checkout scm
+            }
+        }
+
+        stage('Source Build') {
+            steps {
+                container('gradle') {
+                    sh 'chmod +x gradlew'
+                    sh './gradlew clean build'
                 }
+            }
+        }
 
-                // quality gate 통과시 까지 대기
+        stage('SonarQube Analysis') {
+            steps {
+                container('gradle') {
+                    withSonarQubeEnv('sonarqube-server') {
+                        sh """
+                        ${env.SONAR_SCANNER_HOME}/bin/sonar-scanner \
+                            -Dsonar.host.url=http://sonarqube:9000 \
+                            -Dsonar.projectKey=${APP_NAME} \
+                            -Dsonar.projectBaseDir=. \
+                            -Dsonar.sources=src/main \
+                            -Dsonar.java.binaries=build/classes
+                        """
+                    }
+                }
                 timeout(time: 1, unit: 'MINUTES') {
-
-                    // Parameter indicates whether to set pipeline to UNSTABLE if Quality Gate fails
-                    // true = set pipeline to UNSTABLE, false = don't
                     waitForQualityGate abortPipeline: true
                 }
             }
         }
 
-    }
-
-    post {
-        always {
-            scanForIssues tool: ktLint(pattern: '**/ktlint/**/*.xml')
-            junit '**/test-results/**/*.xml'
-            jacoco sourcePattern: '**/src/main/kotlin'
-            script {
-                if (isNotificationNecessary()) {
-                    mineRepository()
-                    emailext attachLog: true, body: email_content(), subject: email_subject(), to: 'junoyoon@gmail.com'
-                    slackSend(channel: "#jenkins", message: "${custom_msg(currentBuild.currentResult)}")
+        stage('Build Docker Image') {
+            steps {
+                container('kaniko') {
+                    withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                        sh """
+                            echo "{\\"auths\\":{\\"${HARBOR_URL}\\":{\\"username\\":\\"${HARBOR_USER}\\",\\"password\\":\\"${HARBOR_PASSWORD}\\"}}}" > /kaniko/.docker/config.json
+                        """
+                    }
+                    
+                    sh """
+                        /kaniko/executor \
+                        --context `pwd` \
+                        --dockerfile Dockerfile \
+                        --destination ${IMAGE_NAME}:${env.BUILD_NUMBER} \
+                        --insecure \
+                        --skip-tls-verify
+                    """
                 }
             }
         }
 
-        success {
-            script {
-                  if (params.DEPLOY_ENABLED == true) {
-                     archiveArtifacts artifacts: 'projects/spring-app/build/libs/*-SNAPSHOT.jar', followSymlinks: false
-                     build(
-                             job: 'pipeline-deploy',
-                             parameters: [booleanParam(name: 'ARE_YOU_SURE', value: "true")],
-                             wait: false,
-                             propagate: false
-                      )
-                  }
-                  if (isPr()) {
-                      echo "pipeline-deploy 실행"
-                      if (env.CHANGE_ID) {
-                        pullRequest.comment('This PR invoked pipeline-deploy..')
-                      }
-                  }
+        stage('Approval') {
+            steps {
+                script {
+                    def userInput = input(
+                        id: 'Deploy', 
+                        message: '배포하시겠습니까?', 
+                        parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: 'Docker Image ID: ' + env.BUILD_NUMBER, name: 'Proceed']
+                        ]
+                    )
+                }
+            }
+        }
+
+        stage('Argo Git Push') {
+            steps {
+                container('gradle') {
+                    withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD')]) {
+                        sh """
+                            git config --global user.email "${GIT_USER_EMAIL}"
+                            git config --global user.name "${GIT_USER_NAME}"
+                            
+                            rm -rf gitops-repo
+                            git clone ${GITOPS_REPO_URL} gitops-repo
+                            
+                            cd gitops-repo/wordpress
+                            
+                            # values.yaml의 tag 값을 현재 빌드 번호로 변경
+                            sed -i 's/tag: ".*"/tag: "${env.BUILD_NUMBER}"/' values.yaml
+                            
+                            git add values.yaml
+                            git commit -m "Update image tag to ${env.BUILD_NUMBER}"
+                            
+                            git push https://${GIT_USER}:${GIT_PASSWORD}@github.com/seongtaemin/fastcampus-jenkins.git HEAD:main
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('ArgoCD Sync') {
+            steps {
+                container('gradle') {
+                    sh """
+                        curl -sSL -o argocd https://${ARGOCD_SERVER}/download/argocd-linux-amd64
+                        chmod +x argocd
+                    """
+
+                    withCredentials([usernamePassword(credentialsId: 'argocd-credentials', usernameVariable: 'ARGO_USER', passwordVariable: 'ARGO_PASSWORD')]) {
+                        sh """
+                            ./argocd login ${ARGOCD_SERVER} \
+                                --username ${ARGO_USER} \
+                                --password ${ARGO_PASSWORD} \
+                                --insecure \
+                                --grpc-web
+
+                            ./argocd app sync ${APP_NAME} \
+                                --insecure \
+                                --grpc-web
+                                
+                            ./argocd app wait ${APP_NAME} \
+                                --health \
+                                --insecure \
+                                --grpc-web
+                        """
+                    }
+                }
             }
         }
     }
-}
-
-
-
-
-// pipeline 바깥쪽 영역은 groovy 사용 가능
-def email_content() {
-    return '''이 이메일은 중요한 것이여!!
-
-${DEFAULT_CONTENT}
-
-'''
-}
-
-def email_subject() {
-    return '빌드통지!! - ${DEFAULT_SUBJECT}'
-}
-
-def custom_msg(status) {
-    return " $status: Job [${env.JOB_NAME}] Logs path: ${env.BUILD_URL}/consoleText"
-}
-
-
-
-def isSonarQubeNecessary() {
-    return isMainOrDevelop()
-}
-
-def isDeploymentNecessary() {
-  return isMainOrDevelop() || (env.GITHUB_COMMENT ?: "").contains("deploy this")
-}
-
-def isNotificationNecessary() {
-    return !isPr()
-}
-
-def isMainOrDevelop() {
-    return (env.BRANCH_NAME == "develop" || env.BRANCH_NAME == "main")
-}
-
-def isPr() {
-    return env.BRANCH_NAME.startsWith("PR-")
 }
