@@ -35,7 +35,9 @@ pipeline {
 
         stage('Git Download') {
             steps {
-                checkout scm
+                git branch: 'main',
+                    credentialsId: 'github-token',
+                    url: 'https://github.com/seongtaemin/fastcampus-jenkins.git'
             }
         }
 
