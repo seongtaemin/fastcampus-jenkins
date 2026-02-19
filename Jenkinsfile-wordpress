@@ -58,8 +58,9 @@ pipeline {
                 script {
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh """
-                            docker login ${HARBOR_URL} -u ${HARBOR_USER} -p ${HARBOR_PASSWORD}
-                            docker build -t ${IMAGE_NAME}:${env.BUILD_NUMBER} .
+                            docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
+                            docker pull wordpress:6.0
+                            docker tag wordpress:6.0 ${IMAGE_NAME}:${env.BUILD_NUMBER}
                             docker push ${IMAGE_NAME}:${env.BUILD_NUMBER}
                         """
                     }
@@ -92,15 +93,15 @@ pipeline {
                             rm -rf gitops-repo
                             git clone ${GITOPS_REPO_URL} gitops-repo
                             
-                            cd gitops-repo/wordpress
+                            cd gitops-repo
                             
-                            # values.yaml의 tag 값을 현재 빌드 번호로 변경
-                            sed -i 's/tag: ".*"/tag: "${env.BUILD_NUMBER}"/' values.yaml
+                            # wordpress.yaml의 image 태그를 현재 빌드 번호로 변경
+                            sed -i 's|image: ${IMAGE_NAME}:.*|image: ${IMAGE_NAME}:${env.BUILD_NUMBER}|' wordpress.yaml
                             
-                            git add values.yaml
+                            git add wordpress.yaml
                             git commit -m "Update image tag to ${env.BUILD_NUMBER}"
                             
-                            git push https://${GIT_USER}:${GIT_PASSWORD}@github.com/seongtaemin/wordpress.git HEAD:main
+                            git push https://\${GIT_USER}:\${GIT_PASSWORD}@github.com/seongtaemin/wordpress.git HEAD:main
                         """
                     }
                 }
@@ -111,15 +112,25 @@ pipeline {
             steps {
                 script {
                     sh """
-                        curl -sSL -o argocd https://${ARGOCD_SERVER}/download/argocd-linux-amd64
+                        curl -sSL -o argocd https://${ARGOCD_SERVER}/download/argocd-linux-amd64 --insecure
                         chmod +x argocd
                     """
 
                     withCredentials([usernamePassword(credentialsId: 'argocd-credentials', usernameVariable: 'ARGO_USER', passwordVariable: 'ARGO_PASSWORD')]) {
                         sh """
                             ./argocd login ${ARGOCD_SERVER} \
-                                --username ${ARGO_USER} \
-                                --password ${ARGO_PASSWORD} \
+                                --username \${ARGO_USER} \
+                                --password \${ARGO_PASSWORD} \
+                                --insecure \
+                                --grpc-web
+
+                            ./argocd app create ${APP_NAME} \
+                                --repo ${GITOPS_REPO_URL} \
+                                --path . \
+                                --dest-server https://kubernetes.default.svc \
+                                --dest-namespace default \
+                                --revision main \
+                                --upsert \
                                 --insecure \
                                 --grpc-web
 
