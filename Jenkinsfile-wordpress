@@ -1,14 +1,11 @@
 pipeline {
-    agent {
-        kubernetes {
-            inheritFrom "gradle:7.6.1-jdk17 kaniko"
-        }
-    }
+    // 어떠한 에이전트에서도 실행 가능함을 표현
+    agent any
 
     environment {
         // 사용자 설정 반영
         HARBOR_URL = 'harbor.kolon.local'
-        GITOPS_REPO_URL = 'https://github.com/seongtaemin/fastcampus-jenkins.git'
+        GITOPS_REPO_URL = 'https://github.com/seongtaemin/wordpress.git'
         ARGOCD_SERVER = '172.18.229.174:30002'
         
         // 프로젝트 및 이미지 설정
@@ -44,7 +41,7 @@ pipeline {
 
         stage('Source Build') {
             steps {
-                container('gradle') {
+                script {
                     sh 'chmod +x gradlew'
                     sh './gradlew clean build'
                 }
@@ -53,7 +50,7 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                container('gradle') {
+                script {
                     withSonarQubeEnv('sonarqube-server') {
                         sh """
                         ${env.SONAR_SCANNER_HOME}/bin/sonar-scanner \
@@ -73,7 +70,7 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                container('kaniko') {
+                script {
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh """
                             echo "{\\"auths\\":{\\"${HARBOR_URL}\\":{\\"username\\":\\"${HARBOR_USER}\\",\\"password\\":\\"${HARBOR_PASSWORD}\\"}}}" > /kaniko/.docker/config.json
@@ -108,7 +105,7 @@ pipeline {
 
         stage('Argo Git Push') {
             steps {
-                container('gradle') {
+                script {
                     withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD')]) {
                         sh """
                             git config --global user.email "${GIT_USER_EMAIL}"
@@ -125,7 +122,7 @@ pipeline {
                             git add values.yaml
                             git commit -m "Update image tag to ${env.BUILD_NUMBER}"
                             
-                            git push https://${GIT_USER}:${GIT_PASSWORD}@github.com/seongtaemin/fastcampus-jenkins.git HEAD:main
+                            git push https://${GIT_USER}:${GIT_PASSWORD}@github.com/seongtaemin/wordpress.git HEAD:main
                         """
                     }
                 }
@@ -134,7 +131,7 @@ pipeline {
 
         stage('ArgoCD Sync') {
             steps {
-                container('gradle') {
+                script {
                     sh """
                         curl -sSL -o argocd https://${ARGOCD_SERVER}/download/argocd-linux-amd64
                         chmod +x argocd
