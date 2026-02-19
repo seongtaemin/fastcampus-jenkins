@@ -33,23 +33,6 @@ pipeline {
             }
         }
 
-        stage('Git Download') {
-            steps {
-                git branch: 'main',
-                    credentialsId: 'github-token',
-                    url: 'https://github.com/seongtaemin/fastcampus-jenkins.git'
-            }
-        }
-
-        stage('Source Build') {
-            steps {
-                script {
-                    sh 'chmod +x gradlew'
-                    sh './gradlew clean build'
-                }
-            }
-        }
-
         stage('SonarQube Analysis') {
             steps {
                 script {
@@ -59,8 +42,8 @@ pipeline {
                             -Dsonar.host.url=http://sonarqube:9000 \
                             -Dsonar.projectKey=${APP_NAME} \
                             -Dsonar.projectBaseDir=. \
-                            -Dsonar.sources=src/main \
-                            -Dsonar.java.binaries=build/classes
+                            -Dsonar.sources=. \
+                            -Dsonar.exclusions=vendor/**,node_modules/**,*.xml,*.yaml
                         """
                     }
                 }
