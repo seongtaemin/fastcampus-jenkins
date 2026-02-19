@@ -58,19 +58,11 @@ pipeline {
                 script {
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh """
-                            mkdir -p /kaniko/.docker
-                            echo "{\\\"auths\\\":{\\\"${HARBOR_URL}\\\":{\\\"username\\\":\\\"${HARBOR_USER}\\\",\\\"password\\\":\\\"${HARBOR_PASSWORD}\\\"}}}" > /kaniko/.docker/config.json
+                            docker login ${HARBOR_URL} -u ${HARBOR_USER} -p ${HARBOR_PASSWORD}
+                            docker build -t ${IMAGE_NAME}:${env.BUILD_NUMBER} .
+                            docker push ${IMAGE_NAME}:${env.BUILD_NUMBER}
                         """
                     }
-                    
-                    sh """
-                        /kaniko/executor \
-                        --context `pwd` \
-                        --dockerfile Dockerfile \
-                        --destination ${IMAGE_NAME}:${env.BUILD_NUMBER} \
-                        --insecure \
-                        --skip-tls-verify
-                    """
                 }
             }
         }
