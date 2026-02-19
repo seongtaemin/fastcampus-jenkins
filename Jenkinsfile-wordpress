@@ -58,7 +58,8 @@ pipeline {
                 script {
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh """
-                            echo "{\\"auths\\":{\\"${HARBOR_URL}\\":{\\"username\\":\\"${HARBOR_USER}\\",\\"password\\":\\"${HARBOR_PASSWORD}\\"}}}" > /kaniko/.docker/config.json
+                            mkdir -p /kaniko/.docker
+                            echo "{\\\"auths\\\":{\\\"${HARBOR_URL}\\\":{\\\"username\\\":\\\"${HARBOR_USER}\\\",\\\"password\\\":\\\"${HARBOR_PASSWORD}\\\"}}}" > /kaniko/.docker/config.json
                         """
                     }
                     
