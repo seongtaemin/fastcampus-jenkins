@@ -43,7 +43,7 @@ pipeline {
                             -Dsonar.projectKey=${APP_NAME} \
                             -Dsonar.projectBaseDir=. \
                             -Dsonar.sources=. \
-                            -Dsonar.exclusions=vendor/**,node_modules/**,*.xml,*.yaml
+                            -Dsonar.exclusions=vendor/**,node_modules/**,**/*.java,**/*.xml,**/*.yaml
                         """
                     }
                 }
