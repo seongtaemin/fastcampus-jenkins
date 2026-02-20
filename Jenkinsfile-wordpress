@@ -79,17 +79,17 @@ pipeline {
                         sh """
                             docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
                             
-                            # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push
+                            # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
                             echo "=== WordPress 이미지 (${WORDPRESS_VERSION}) ==="
                             docker pull wordpress:${WORDPRESS_VERSION}
-                            docker tag wordpress:${WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
-                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
+                            docker tag wordpress:${WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION}
+                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION}
                             
-                            # MySQL 이미지: 공식 레지스트리에서 pull → Harbor에 push
+                            # MySQL 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
                             echo "=== MySQL 이미지 (${MYSQL_VERSION}) ==="
                             docker pull mysql:${MYSQL_VERSION}
-                            docker tag mysql:${MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
-                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
+                            docker tag mysql:${MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION}
+                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION}
                         """
                     }
                 }
@@ -123,18 +123,15 @@ pipeline {
                             
                             cd gitops-repo
                             
-                            # wordpress.yaml의 image 태그를 현재 빌드 번호로 변경 (주석은 유지)
-                            sed -i "s|image: .*wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER} # upstream-version: ${env.WORDPRESS_VERSION}|" wordpress.yaml
-                            # Add imagePullSecrets dynamically
-                            sed -i "/containers:/i \\      imagePullSecrets:\\n      - name: harbor-credentials" wordpress.yaml
+                            # wordpress.yaml의 image 태그를 고정 버전으로 변경 (주석은 유지)
+                            sed -i "s|image: .*wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION} # upstream-version: ${env.WORDPRESS_VERSION}|" wordpress.yaml
                             
-                            # mysql.yaml의 image 태그를 현재 빌드 번호로 변경 (주석은 유지)
-                            sed -i "s|image: .*mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER} # upstream-version: ${env.MYSQL_VERSION}|" mysql.yaml
-                            # Add imagePullSecrets dynamically
-                            sed -i "/containers:/i \\      imagePullSecrets:\\n      - name: harbor-credentials" mysql.yaml
+                            # mysql.yaml의 image 태그를 고정 버전으로 변경 (주석은 유지)
+                            sed -i "s|image: .*mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION} # upstream-version: ${env.MYSQL_VERSION}|" mysql.yaml
                             
                             git add wordpress.yaml mysql.yaml
-                            git commit -m "Update WordPress and MySQL image tags to ${env.BUILD_NUMBER}"
+                            # 변경사항이 있을 때만 커밋
+                            git diff --quiet && git diff --staged --quiet || git commit -m "Ensure WordPress and MySQL image tags are ${env.WORDPRESS_VERSION}/${env.MYSQL_VERSION}"
                             
                             git push https://\${GIT_USER}:\${GIT_PASSWORD}@github.com/seongtaemin/wordpress.git HEAD:main
                         """
