@@ -4,7 +4,7 @@ pipeline {
 
     environment {
         // 사용자 설정 반영
-        HARBOR_URL = 'saltlux.kolon.local'
+        HARBOR_URL = 'harbor.kolon.local'
         GITOPS_REPO_URL = 'https://github.com/seongtaemin/wordpress.git'
         ARGOCD_SERVER = '172.18.229.174:30002'
         
@@ -78,7 +78,7 @@ pipeline {
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh """
                             docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
-                            
+
                             # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
                             echo "=== WordPress 이미지 (${WORDPRESS_VERSION}) ==="
                             docker pull wordpress:${WORDPRESS_VERSION}
