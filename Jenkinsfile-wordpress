@@ -123,7 +123,7 @@ pipeline {
                             ./argocd login ${ARGOCD_SERVER} \
                                 --username \${ARGO_USER} \
                                 --password \${ARGO_PASSWORD} \
-                                --insecure \
+                                --plaintext \
                                 --grpc-web
 
                             ./argocd app create ${APP_NAME} \
@@ -133,16 +133,16 @@ pipeline {
                                 --dest-namespace default \
                                 --revision main \
                                 --upsert \
-                                --insecure \
+                                --plaintext \
                                 --grpc-web
 
                             ./argocd app sync ${APP_NAME} \
-                                --insecure \
+                                --plaintext \
                                 --grpc-web
                                 
                             ./argocd app wait ${APP_NAME} \
                                 --health \
-                                --insecure \
+                                --plaintext \
                                 --grpc-web
                         """
                     }
