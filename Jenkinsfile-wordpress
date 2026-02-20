@@ -47,21 +47,7 @@ pipeline {
                     echo "WordPress Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
                     echo "MySQL Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
 
-                    // ServiceAccount Patch 시도 (이미지 Pull 문제 해결을 위해)
-                    sh """
-                        # kubectl 설치 확인 및 다운로드
-                        if ! command -v kubectl &> /dev/null; then
-                            echo "kubectl not found, downloading..."
-                            curl -LO "https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-                            chmod +x kubectl
-                        else
-                            cp \$(which kubectl) ./kubectl
-                        fi
-                        
-                        echo "Attempting to patch default ServiceAccount with harbor-credentials..."
-                        # k8s config가 없으면 실패할 수 있음. 실패해도 파이프라인 진행.
-                        ./kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "harbor-credentials"}]}' || echo "Warning: Failed to patch default ServiceAccount (permission/config needed)"
-                    """
+
                 }
             }
         }
@@ -139,9 +125,13 @@ pipeline {
                             
                             # wordpress.yaml의 image 태그를 현재 빌드 번호로 변경 (주석은 유지)
                             sed -i "s|image: .*wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER} # upstream-version: ${env.WORDPRESS_VERSION}|" wordpress.yaml
+                            # Add imagePullSecrets dynamically
+                            sed -i "/containers:/i \\      imagePullSecrets:\\n      - name: harbor-credentials" wordpress.yaml
                             
                             # mysql.yaml의 image 태그를 현재 빌드 번호로 변경 (주석은 유지)
                             sed -i "s|image: .*mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER} # upstream-version: ${env.MYSQL_VERSION}|" mysql.yaml
+                            # Add imagePullSecrets dynamically
+                            sed -i "/containers:/i \\      imagePullSecrets:\\n      - name: harbor-credentials" mysql.yaml
                             
                             git add wordpress.yaml mysql.yaml
                             git commit -m "Update WordPress and MySQL image tags to ${env.BUILD_NUMBER}"
