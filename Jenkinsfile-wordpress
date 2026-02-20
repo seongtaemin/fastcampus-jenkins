@@ -148,17 +148,39 @@ pipeline {
                     """
 
                     withCredentials([usernamePassword(credentialsId: 'argocd-credentials', usernameVariable: 'ARGO_USER', passwordVariable: 'ARGO_PASSWORD')]) {
+                        
+                        // 1. 로그인
                         sh """
                             ./argocd login ${ARGOCD_SERVER} \
                                 --username \${ARGO_USER} \
                                 --password \${ARGO_PASSWORD} \
                                 --plaintext \
                                 --grpc-web
+                        """
 
+                        // 2. 클러스터 목록 조회 (헤더 제외하고 첫 번째 컬럼인 SERVER URL만 추출)
+                        def clusters = sh(
+                            script: "./argocd cluster list --plaintext --grpc-web | awk 'NR>1 {print \$1}'", 
+                            returnStdout: true
+                        ).trim().tokenize('\n')
+
+                        // 3. 사용자에게 배포할 클러스터 선택 요청
+                        def selectedCluster = input(
+                            id: 'SelectCluster',
+                            message: '배포할 Kubernetes 클러스터를 선택하세요:',
+                            parameters: [
+                                choice(name: 'DEST_SERVER', choices: clusters, description: 'Target Kubernetes Cluster URL')
+                            ]
+                        )
+                        
+                        echo "Selected Cluster: ${selectedCluster}"
+
+                        // 4. 선택된 클러스터로 앱 생성 및 배포
+                        sh """
                             ./argocd app create ${APP_NAME} \
                                 --repo ${GITOPS_REPO_URL} \
                                 --path . \
-                                --dest-server https://kubernetes.default.svc \
+                                --dest-server ${selectedCluster} \
                                 --dest-namespace default \
                                 --revision main \
                                 --upsert \
