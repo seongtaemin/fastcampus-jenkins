@@ -4,7 +4,7 @@ pipeline {
 
     environment {
         // 사용자 설정 반영
-        HARBOR_URL = 'saltlux.kolon.local'
+        HARBOR_URL = 'https://saltlux.kolon.local'
         GITOPS_REPO_URL = 'https://github.com/seongtaemin/wordpress.git'
         ARGOCD_SERVER = '172.18.229.174:30002'
         
