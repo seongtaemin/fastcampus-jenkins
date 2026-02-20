@@ -2,6 +2,8 @@ pipeline {
     // 어떠한 에이전트에서도 실행 가능함을 표현
     agent any
 
+
+
     environment {
         // 사용자 설정 반영
         HARBOR_URL = 'harbor.kolon.local'
@@ -10,7 +12,6 @@ pipeline {
         
         // 프로젝트 및 이미지 설정
         HARBOR_PROJECT = 'library'
-        APP_NAME = 'wordpress'
         
         // SonarQube 설정 (Tool Name)
         SONAR_SCANNER_HOME = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
@@ -25,6 +26,15 @@ pipeline {
             steps {
                 script {
                     echo "Initializing pipeline..."
+                    
+                    env.APP_NAME = input(
+                        message: 'Enter Application Name', 
+                        parameters: [
+                            string(defaultValue: 'wordpress', description: 'Application Name', name: 'APP_NAME')
+                        ]
+                    )
+                    
+                    echo "App Name: ${env.APP_NAME}"
                     echo "Harbor URL: ${HARBOR_URL}"
                     echo "ArgoCD Server: ${ARGOCD_SERVER}"
                     
