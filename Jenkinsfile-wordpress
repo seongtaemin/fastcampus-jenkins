@@ -28,23 +28,24 @@ pipeline {
                     echo "Harbor URL: ${HARBOR_URL}"
                     echo "ArgoCD Server: ${ARGOCD_SERVER}"
                     
-                    // GitOps 리포지토리에서 YAML 파일의 이미지 버전 추출
+                    // GitOps 리포지토리에서 YAML 파일의 주석(# upstream-version: X.Y)으로부터 버전 추출
                     sh "rm -rf gitops-repo && git clone ${GITOPS_REPO_URL} gitops-repo"
                     
+                    // grep으로 주석 부분 추출 -> awk로 버전 값만 분리 -> tr로 따옴표/공백 제거
                     env.WORDPRESS_VERSION = sh(
-                        script: "grep 'image:.*wordpress:' gitops-repo/wordpress.yaml | sed 's/.*wordpress://' | tr -d ' '",
+                        script: "grep 'upstream-version:' gitops-repo/wordpress.yaml | awk -F 'upstream-version:' '{print \$2}' | tr -d ' \"'",
                         returnStdout: true
                     ).trim()
                     
                     env.MYSQL_VERSION = sh(
-                        script: "grep 'image:.*mysql:' gitops-repo/mysql.yaml | sed 's/.*mysql://' | tr -d ' '",
+                        script: "grep 'upstream-version:' gitops-repo/mysql.yaml | awk -F 'upstream-version:' '{print \$2}' | tr -d ' \"'",
                         returnStdout: true
                     ).trim()
                     
-                    echo "WordPress Version: ${env.WORDPRESS_VERSION}"
-                    echo "MySQL Version: ${env.MYSQL_VERSION}"
-                    echo "WordPress Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
-                    echo "MySQL Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
+                    echo "WordPress Source Version: ${env.WORDPRESS_VERSION}"
+                    echo "MySQL Source Version: ${env.MYSQL_VERSION}"
+                    echo "WordPress Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
+                    echo "MySQL Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
                 }
             }
         }
@@ -77,15 +78,15 @@ pipeline {
                             docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
                             
                             # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push
-                            echo "=== WordPress 이미지 (${env.WORDPRESS_VERSION}) ==="
-                            docker pull wordpress:${env.WORDPRESS_VERSION}
-                            docker tag wordpress:${env.WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
+                            echo "=== WordPress 이미지 (${WORDPRESS_VERSION}) ==="
+                            docker pull wordpress:${WORDPRESS_VERSION}
+                            docker tag wordpress:${WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
                             docker push ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
                             
                             # MySQL 이미지: 공식 레지스트리에서 pull → Harbor에 push
-                            echo "=== MySQL 이미지 (${env.MYSQL_VERSION}) ==="
-                            docker pull mysql:${env.MYSQL_VERSION}
-                            docker tag mysql:${env.MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
+                            echo "=== MySQL 이미지 (${MYSQL_VERSION}) ==="
+                            docker pull mysql:${MYSQL_VERSION}
+                            docker tag mysql:${MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
                             docker push ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
                         """
                     }
@@ -120,11 +121,11 @@ pipeline {
                             
                             cd gitops-repo
                             
-                            # wordpress.yaml의 image 태그를 현재 빌드 번호로 변경
-                            sed -i 's|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}|' wordpress.yaml
+                            # wordpress.yaml의 image 태그를 현재 빌드 번호로 변경 (주석은 유지)
+                            sed -i "s|image: .*wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER} # upstream-version: ${env.WORDPRESS_VERSION}|" wordpress.yaml
                             
-                            # mysql.yaml의 image 태그를 현재 빌드 번호로 변경
-                            sed -i 's|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}|' mysql.yaml
+                            # mysql.yaml의 image 태그를 현재 빌드 번호로 변경 (주석은 유지)
+                            sed -i "s|image: .*mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER} # upstream-version: ${env.MYSQL_VERSION}|" mysql.yaml
                             
                             git add wordpress.yaml mysql.yaml
                             git commit -m "Update WordPress and MySQL image tags to ${env.BUILD_NUMBER}"
