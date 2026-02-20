@@ -112,7 +112,9 @@ pipeline {
             steps {
                 script {
                     sh """
-                        curl -sSL -o argocd https://${ARGOCD_SERVER}/download/argocd-linux-amd64 --insecure
+                        # ArgoCD CLI 다운로드 시도 (서버에서 먼저 시도, 실패 시 GitHub에서 다운로드)
+                        curl -sSL -o argocd --retry 3 --retry-delay 5 --max-time 30 https://${ARGOCD_SERVER}/download/argocd-linux-amd64 --insecure || \
+                        curl -sSL -o argocd --retry 3 --retry-delay 5 --max-time 60 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
                         chmod +x argocd
                     """
 
