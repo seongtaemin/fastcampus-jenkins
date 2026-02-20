@@ -194,7 +194,8 @@ pipeline {
                             ./argocd app wait ${APP_NAME} \
                                 --health \
                                 --plaintext \
-                                --grpc-web
+                                --grpc-web \
+                                --timeout 300
                         """
                     }
                 }
