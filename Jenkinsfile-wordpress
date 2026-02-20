@@ -11,7 +11,6 @@ pipeline {
         // 프로젝트 및 이미지 설정
         HARBOR_PROJECT = 'library'
         APP_NAME = 'wordpress'
-        IMAGE_NAME = "${HARBOR_URL}/${HARBOR_PROJECT}/${APP_NAME}"
         
         // SonarQube 설정 (Tool Name)
         SONAR_SCANNER_HOME = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
@@ -28,7 +27,24 @@ pipeline {
                     echo "Initializing pipeline..."
                     echo "Harbor URL: ${HARBOR_URL}"
                     echo "ArgoCD Server: ${ARGOCD_SERVER}"
-                    echo "Image: ${IMAGE_NAME}:${env.BUILD_NUMBER}"
+                    
+                    // GitOps 리포지토리에서 YAML 파일의 이미지 버전 추출
+                    sh "rm -rf gitops-repo && git clone ${GITOPS_REPO_URL} gitops-repo"
+                    
+                    env.WORDPRESS_VERSION = sh(
+                        script: "grep 'image:.*wordpress:' gitops-repo/wordpress.yaml | sed 's/.*wordpress://' | tr -d ' '",
+                        returnStdout: true
+                    ).trim()
+                    
+                    env.MYSQL_VERSION = sh(
+                        script: "grep 'image:.*mysql:' gitops-repo/mysql.yaml | sed 's/.*mysql://' | tr -d ' '",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "WordPress Version: ${env.WORDPRESS_VERSION}"
+                    echo "MySQL Version: ${env.MYSQL_VERSION}"
+                    echo "WordPress Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
+                    echo "MySQL Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
                 }
             }
         }
@@ -59,9 +75,18 @@ pipeline {
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh """
                             docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
-                            docker pull wordpress:6.0
-                            docker tag wordpress:6.0 ${IMAGE_NAME}:${env.BUILD_NUMBER}
-                            docker push ${IMAGE_NAME}:${env.BUILD_NUMBER}
+                            
+                            # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push
+                            echo "=== WordPress 이미지 (${env.WORDPRESS_VERSION}) ==="
+                            docker pull wordpress:${env.WORDPRESS_VERSION}
+                            docker tag wordpress:${env.WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
+                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}
+                            
+                            # MySQL 이미지: 공식 레지스트리에서 pull → Harbor에 push
+                            echo "=== MySQL 이미지 (${env.MYSQL_VERSION}) ==="
+                            docker pull mysql:${env.MYSQL_VERSION}
+                            docker tag mysql:${env.MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
+                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}
                         """
                     }
                 }
@@ -96,10 +121,13 @@ pipeline {
                             cd gitops-repo
                             
                             # wordpress.yaml의 image 태그를 현재 빌드 번호로 변경
-                            sed -i 's|image: ${IMAGE_NAME}:.*|image: ${IMAGE_NAME}:${env.BUILD_NUMBER}|' wordpress.yaml
+                            sed -i 's|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}|' wordpress.yaml
                             
-                            git add wordpress.yaml
-                            git commit -m "Update image tag to ${env.BUILD_NUMBER}"
+                            # mysql.yaml의 image 태그를 현재 빌드 번호로 변경
+                            sed -i 's|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}|' mysql.yaml
+                            
+                            git add wordpress.yaml mysql.yaml
+                            git commit -m "Update WordPress and MySQL image tags to ${env.BUILD_NUMBER}"
                             
                             git push https://\${GIT_USER}:\${GIT_PASSWORD}@github.com/seongtaemin/wordpress.git HEAD:main
                         """
