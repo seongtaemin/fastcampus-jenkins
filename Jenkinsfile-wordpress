@@ -46,6 +46,20 @@ pipeline {
                     echo "MySQL Source Version: ${env.MYSQL_VERSION}"
                     echo "WordPress Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
                     echo "MySQL Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
+                    
+                    // ServiceAccount Patch 시도 (이미지 Pull 문제 해결을 위해)
+                    sh """
+                        # kubectl 다운로드
+                        if ! command -v kubectl &> /dev/null; then
+                            curl -LO "https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                            chmod +x kubectl
+                        else
+                            cp \$(which kubectl) ./kubectl
+                        fi
+                        
+                        # default ServiceAccount에 imagePullSecrets 패치 (실패해도 무시)
+                        ./kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "harbor-credentials"}]}' || echo "Failed to patch ServiceAccount. Please ensure kubectl config is set or run manually."
+                    """
                 }
             }
         }
