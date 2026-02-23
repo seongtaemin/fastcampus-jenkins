@@ -179,7 +179,7 @@ pipeline {
                                 def imgVersion = parts[2]
                                 sh """
                                     cd gitops-repo
-                                    sed -i 's|image: .*${imgName}:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/${imgName}:${imgVersion} # upstream-version: ${imgVersion}|' ${imgFile}
+                                    sed -i 's|image: .*${imgName}:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/${imgName}:${imgVersion}|' ${imgFile}
                                 """
                                 changedFilesList.add(imgFile)
                             }
