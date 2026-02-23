@@ -174,6 +174,11 @@ pipeline {
                             
                             # 모든 YAML 파일에서 namespace 값을 사용자가 입력한 값으로 일괄 변경
                             find . -name "*.yaml" -o -name "*.yml" | xargs -I {} sed -i 's/^\\([[:space:]]*\\)namespace:.*/\\1namespace: ${env.TARGET_NAMESPACE}/g' {}
+                            
+                            # namespace.yaml의 metadata.name 도 변경
+                            if [ -f namespace.yaml ]; then
+                                sed -i -e '/^metadata:/,/^  name:/ s/^  name:.*/  name: ${env.TARGET_NAMESPACE}/g' namespace.yaml
+                            fi
                         """
                         
                         // 발견된 모든 이미지에 대해 YAML 파일의 image 태그를 Harbor 이미지로 변경
