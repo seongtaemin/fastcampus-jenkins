@@ -27,14 +27,18 @@ pipeline {
                 script {
                     echo "Initializing pipeline..."
                     
-                    env.APP_NAME = input(
-                        message: 'Enter Application Name', 
+                    def userInput = input(
+                        message: 'Enter Application Details', 
                         parameters: [
-                            string(defaultValue: '3tier-app', description: 'Application Name', name: 'APP_NAME')
+                            string(defaultValue: '3tier-app', description: 'Application Name', name: 'APP_NAME'),
+                            string(defaultValue: '3tier-app', description: 'Target Namespace', name: 'TARGET_NAMESPACE', trim: true)
                         ]
                     )
+                    env.APP_NAME = userInput['APP_NAME']
+                    env.TARGET_NAMESPACE = userInput['TARGET_NAMESPACE']
                     
                     echo "App Name: ${env.APP_NAME}"
+                    echo "Target Namespace: ${env.TARGET_NAMESPACE}"
                     echo "Harbor URL: ${HARBOR_URL}"
                     echo "ArgoCD Server: ${ARGOCD_SERVER}"
                     
@@ -167,6 +171,9 @@ pipeline {
                             git clone ${GITOPS_REPO_URL} gitops-repo
                             
                             cd gitops-repo
+                            
+                            # 모든 YAML 파일에서 namespace 값을 사용자가 입력한 값으로 일괄 변경
+                            find . -name "*.yaml" -o -name "*.yml" | xargs -I {} sed -i 's/^\\([[:space:]]*\\)namespace:.*/\\1namespace: \${TARGET_NAMESPACE}/g' {}
                         """
                         
                         // 발견된 모든 이미지에 대해 YAML 파일의 image 태그를 Harbor 이미지로 변경
@@ -206,7 +213,7 @@ data:
   .dockerconfigjson: \${DOCKER_CONFIG_BASE64}
 EOF
                             
-                            git add ${changedFiles} harbor-credentials.yaml
+                            git add . && git add harbor-credentials.yaml
                             # 변경사항이 있을 때만 커밋
                             git diff --quiet && git diff --staged --quiet || git commit -m "Ensure Manifests and Harbor Credentials"
                             
@@ -252,13 +259,12 @@ EOF
                             id: 'SelectClusterAndNamespace',
                             message: '배포할 Kubernetes 클러스터와 네임스페이스를 입력하세요:',
                             parameters: [
-                                choice(name: 'DEST_SERVER', choices: clusters, description: 'Target Kubernetes Cluster URL'),
-                                string(name: 'TARGET_NAMESPACE', defaultValue: '3tier-app', description: 'Target Namespace (없으면 자동 생성)', trim: true)
+                                choice(name: 'DEST_SERVER', choices: clusters, description: 'Target Kubernetes Cluster URL')
                             ]
                         )
                         
-                        def selectedCluster = userInput['DEST_SERVER']
-                        def targetNamespace = userInput['TARGET_NAMESPACE']
+                        def selectedCluster = userInput
+                        def targetNamespace = env.TARGET_NAMESPACE
                         
                         echo "Selected Cluster: ${selectedCluster}"
                         echo "Target Namespace: ${targetNamespace}"
