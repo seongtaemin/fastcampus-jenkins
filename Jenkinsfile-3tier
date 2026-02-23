@@ -179,6 +179,9 @@ pipeline {
                             if [ -f namespace.yaml ]; then
                                 sed -i -e '/^metadata:/,/^  name:/ s/^  name:.*/  name: ${env.TARGET_NAMESPACE}/g' namespace.yaml
                             fi
+                            
+                            # Istio AuthorizationPolicy 등의 principals 내 하드코딩된 네임스페이스 경로도 변경
+                            find . -name "*.yaml" -o -name "*.yml" | xargs -I {} sed -i 's|cluster.local/ns/[^/]*/sa/|cluster.local/ns/${env.TARGET_NAMESPACE}/sa/|g' {}
                         """
                         
                         // 발견된 모든 이미지에 대해 YAML 파일의 image 태그를 Harbor 이미지로 변경
