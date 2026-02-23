@@ -65,35 +65,24 @@ pipeline {
                         returnStdout: true
                     ).trim()
                     
-                    // 파싱 결과를 Groovy Map으로 변환
-                    // IMAGE_MAP: [ [file: 'wordpress.yaml', name: 'wordpress', version: '6.0'], ... ]
-                    def imageMap = []
-                    if (imageLines) {
-                        imageLines.split('\n').each { line ->
-                            def parts = line.trim().split('\\|')
-                            if (parts.length == 3) {
-                                imageMap.add([
-                                    file: parts[0],
-                                    name: parts[1],
-                                    version: parts[2]
-                                ])
-                            }
-                        }
-                    }
-                    
-                    if (imageMap.isEmpty()) {
+                    // imageLines를 ';' 구분자로 결합하여 환경변수에 저장
+                    // 형식: "file1|name1|version1;file2|name2|version2;..."
+                    if (!imageLines) {
                         error "GitOps 리포지토리에서 image 항목을 찾을 수 없습니다."
                     }
                     
+                    // 줄바꿈을 ';'로 변환하여 단일 문자열로 저장
+                    env.IMAGE_MAP_STR = imageLines.split('\n').collect { it.trim() }.findAll { it }.join(';')
+                    
                     // 결과 출력
                     echo "========== 발견된 이미지 목록 =========="
-                    imageMap.each { img ->
-                        echo "  파일: ${img.file} | 이미지: ${img.name} | 버전: ${img.version}"
+                    env.IMAGE_MAP_STR.split(';').each { entry ->
+                        def parts = entry.split('\\|')
+                        if (parts.length == 3) {
+                            echo "  파일: ${parts[0]} | 이미지: ${parts[1]} | 버전: ${parts[2]}"
+                        }
                     }
                     echo "========================================"
-                    
-                    // 파이프라인 전체에서 사용할 수 있도록 저장
-                    env.IMAGE_MAP_JSON = groovy.json.JsonOutput.toJson(imageMap)
                 }
             }
         }
@@ -121,20 +110,22 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    // JSON에서 이미지 맵 복원
-                    def imageMap = new groovy.json.JsonSlurper().parseText(env.IMAGE_MAP_JSON)
-                    
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
                         
                         // 발견된 모든 이미지를 순회하면서 pull → tag → push
-                        imageMap.each { img ->
-                            echo "=== ${img.name} 이미지 (${img.version}) ==="
-                            sh """
-                                docker pull ${img.name}:${img.version}
-                                docker tag ${img.name}:${img.version} ${HARBOR_URL}/${HARBOR_PROJECT}/${img.name}:${img.version}
-                                docker push ${HARBOR_URL}/${HARBOR_PROJECT}/${img.name}:${img.version}
-                            """
+                        env.IMAGE_MAP_STR.split(';').each { entry ->
+                            def parts = entry.split('\\|')
+                            if (parts.length == 3) {
+                                def imgName = parts[1]
+                                def imgVersion = parts[2]
+                                echo "=== ${imgName} 이미지 (${imgVersion}) ==="
+                                sh """
+                                    docker pull ${imgName}:${imgVersion}
+                                    docker tag ${imgName}:${imgVersion} ${HARBOR_URL}/${HARBOR_PROJECT}/${imgName}:${imgVersion}
+                                    docker push ${HARBOR_URL}/${HARBOR_PROJECT}/${imgName}:${imgVersion}
+                                """
+                            }
                         }
                     }
                 }
@@ -145,8 +136,10 @@ pipeline {
             steps {
                 script {
                     // 발견된 이미지 목록을 승인 메시지에 표시
-                    def imageMap = new groovy.json.JsonSlurper().parseText(env.IMAGE_MAP_JSON)
-                    def imageDesc = imageMap.collect { "${it.name}:${it.version}" }.join(', ')
+                    def imageDesc = env.IMAGE_MAP_STR.split(';').collect { entry ->
+                        def parts = entry.split('\\|')
+                        parts.length == 3 ? "${parts[1]}:${parts[2]}" : ''
+                    }.findAll { it }.join(', ')
                     
                     def userInput = input(
                         id: 'Deploy', 
@@ -162,9 +155,6 @@ pipeline {
         stage('Argo Git Push') {
             steps {
                 script {
-                    // JSON에서 이미지 맵 복원
-                    def imageMap = new groovy.json.JsonSlurper().parseText(env.IMAGE_MAP_JSON)
-                    
                     withCredentials([
                         usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD'),
                         usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')
@@ -180,15 +170,23 @@ pipeline {
                         """
                         
                         // 발견된 모든 이미지에 대해 YAML 파일의 image 태그를 Harbor 이미지로 변경
-                        imageMap.each { img ->
-                            sh """
-                                cd gitops-repo
-                                sed -i 's|image: .*${img.name}:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/${img.name}:${img.version} # upstream-version: ${img.version}|' ${img.file}
-                            """
+                        def changedFilesList = []
+                        env.IMAGE_MAP_STR.split(';').each { entry ->
+                            def parts = entry.split('\\|')
+                            if (parts.length == 3) {
+                                def imgFile = parts[0]
+                                def imgName = parts[1]
+                                def imgVersion = parts[2]
+                                sh """
+                                    cd gitops-repo
+                                    sed -i 's|image: .*${imgName}:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/${imgName}:${imgVersion} # upstream-version: ${imgVersion}|' ${imgFile}
+                                """
+                                changedFilesList.add(imgFile)
+                            }
                         }
                         
                         // 변경된 YAML 파일 목록 수집
-                        def changedFiles = imageMap.collect { it.file }.unique().join(' ')
+                        def changedFiles = changedFilesList.unique().join(' ')
                         
                         sh """
                             cd gitops-repo
