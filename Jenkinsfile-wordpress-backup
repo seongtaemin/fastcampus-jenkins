@@ -1,0 +1,246 @@
+pipeline {
+    // 어떠한 에이전트에서도 실행 가능함을 표현
+    agent any
+
+
+
+    environment {
+        // 사용자 설정 반영
+        HARBOR_URL = 'harbor.kolon.local'
+        GITOPS_REPO_URL = 'https://github.com/seongtaemin/wordpress.git'
+        ARGOCD_SERVER = '172.18.229.174:30002'
+        
+        // 프로젝트 및 이미지 설정
+        HARBOR_PROJECT = 'library'
+        
+        // SonarQube 설정 (Tool Name)
+        SONAR_SCANNER_HOME = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+        
+        // GitConfig
+        GIT_USER_EMAIL = 'taemni.seong@gmail.com'
+        GIT_USER_NAME = 'seongtaemin'
+    }
+
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo "Initializing pipeline..."
+                    
+                    env.APP_NAME = input(
+                        message: 'Enter Application Name', 
+                        parameters: [
+                            string(defaultValue: 'wordpress', description: 'Application Name', name: 'APP_NAME')
+                        ]
+                    )
+                    
+                    echo "App Name: ${env.APP_NAME}"
+                    echo "Harbor URL: ${HARBOR_URL}"
+                    echo "ArgoCD Server: ${ARGOCD_SERVER}"
+                    
+                    // GitOps 리포지토리에서 YAML 파일의 주석(# upstream-version: X.Y)으로부터 버전 추출
+                    sh "rm -rf gitops-repo && git clone ${GITOPS_REPO_URL} gitops-repo"
+                    
+                    // grep으로 주석 부분 추출 -> awk로 버전 값만 분리 -> tr로 따옴표/공백 제거
+                    env.WORDPRESS_VERSION = sh(
+                        script: "grep 'upstream-version:' gitops-repo/wordpress.yaml | awk -F 'upstream-version:' '{print \$2}' | tr -d ' \"'",
+                        returnStdout: true
+                    ).trim()
+                    
+                    env.MYSQL_VERSION = sh(
+                        script: "grep 'upstream-version:' gitops-repo/mysql.yaml | awk -F 'upstream-version:' '{print \$2}' | tr -d ' \"'",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "WordPress Source Version: ${env.WORDPRESS_VERSION}"
+                    echo "MySQL Source Version: ${env.MYSQL_VERSION}"
+                    echo "WordPress Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
+                    echo "MySQL Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
+
+
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    withSonarQubeEnv('sonarqube-server') {
+                        sh """
+                        ${env.SONAR_SCANNER_HOME}/bin/sonar-scanner \
+                            -Dsonar.host.url=http://sonarqube:9000 \
+                            -Dsonar.projectKey=${APP_NAME} \
+                            -Dsonar.projectBaseDir=. \
+                            -Dsonar.sources=. \
+                            -Dsonar.exclusions=vendor/**,node_modules/**,**/*.java,**/*.xml,**/*.yaml
+                        """
+                    }
+                }
+                timeout(time: 1, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                        sh """
+                            docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
+
+                            # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
+                            echo "=== WordPress 이미지 (${WORDPRESS_VERSION}) ==="
+                            docker pull wordpress:${WORDPRESS_VERSION}
+                            docker tag wordpress:${WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION}
+                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION}
+                            
+                            # MySQL 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
+                            echo "=== MySQL 이미지 (${MYSQL_VERSION}) ==="
+                            docker pull mysql:${MYSQL_VERSION}
+                            docker tag mysql:${MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION}
+                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                script {
+                    def userInput = input(
+                        id: 'Deploy', 
+                        message: '배포하시겠습니까?', 
+                        parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: 'Docker Image ID: ' + env.BUILD_NUMBER, name: 'Proceed']
+                        ]
+                    )
+                }
+            }
+        }
+
+        stage('Argo Git Push') {
+            steps {
+                script {
+                    withCredentials([
+                        usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD'),
+                        usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')
+                    ]) {
+                        sh """
+                            git config --global user.email "${GIT_USER_EMAIL}"
+                            git config --global user.name "${GIT_USER_NAME}"
+                            
+                            rm -rf gitops-repo
+                            git clone ${GITOPS_REPO_URL} gitops-repo
+                            
+                            cd gitops-repo
+                            
+                            # wordpress.yaml의 image 태그를 고정 버전으로 변경 (주석은 유지)
+                            sed -i "s|image: .*wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION} # upstream-version: ${env.WORDPRESS_VERSION}|" wordpress.yaml
+                            
+                            # mysql.yaml의 image 태그를 고정 버전으로 변경 (주석은 유지)
+                            sed -i "s|image: .*mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION} # upstream-version: ${env.MYSQL_VERSION}|" mysql.yaml
+                            
+                            # Generate harbor-credentials.yaml for ArgoCD to manage
+                            AUTH=\$(echo -n "\${HARBOR_USER}:\${HARBOR_PASSWORD}" | base64)
+                            DOCKER_CONFIG_JSON="{\\"auths\\":{\\"${HARBOR_URL}\\":{\\"auth\\":\\"\${AUTH}\\"}}}"
+                            DOCKER_CONFIG_BASE64=\$(echo -n "\${DOCKER_CONFIG_JSON}" | base64 -w 0)
+                            
+                            cat <<EOF > harbor-credentials.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: harbor-credentials
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: \${DOCKER_CONFIG_BASE64}
+EOF
+                            
+                            git add wordpress.yaml mysql.yaml harbor-credentials.yaml
+                            # 변경사항이 있을 때만 커밋
+                            git diff --quiet && git diff --staged --quiet || git commit -m "Ensure Manifests and Harbor Credentials"
+                            
+                            git push https://\${GIT_USER}:\${GIT_PASSWORD}@github.com/seongtaemin/wordpress.git HEAD:main
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('ArgoCD Sync') {
+            steps {
+                script {
+                    sh """
+                        # ArgoCD CLI 다운로드 시도 (서버에서 먼저 시도, 실패 시 GitHub에서 다운로드)
+                        curl -sSL -o argocd --retry 3 --retry-delay 5 --max-time 30 https://${ARGOCD_SERVER}/download/argocd-linux-amd64 --insecure || \
+                        curl -sSL -o argocd --retry 3 --retry-delay 5 --max-time 60 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+                        chmod +x argocd
+                    """
+
+                    withCredentials([
+                        usernamePassword(credentialsId: 'argocd-credentials', usernameVariable: 'ARGO_USER', passwordVariable: 'ARGO_PASSWORD'),
+                        usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')
+                    ]) {
+                        
+                        // 1. 로그인
+                        sh """
+                            ./argocd login ${ARGOCD_SERVER} \
+                                --username \${ARGO_USER} \
+                                --password \${ARGO_PASSWORD} \
+                                --plaintext \
+                                --grpc-web
+                        """
+
+                        // 2. 클러스터 목록 조회 (헤더 제외하고 첫 번째 컬럼인 SERVER URL만 추출)
+                        def clusters = sh(
+                            script: "./argocd cluster list --plaintext --grpc-web | awk 'NR>1 {print \$1}'", 
+                            returnStdout: true
+                        ).trim().tokenize('\n')
+
+                        // 3. 사용자에게 배포할 클러스터 및 네임스페이스 선택 요청
+                        def userInput = input(
+                            id: 'SelectClusterAndNamespace',
+                            message: '배포할 Kubernetes 클러스터와 네임스페이스를 입력하세요:',
+                            parameters: [
+                                choice(name: 'DEST_SERVER', choices: clusters, description: 'Target Kubernetes Cluster URL'),
+                                string(name: 'TARGET_NAMESPACE', defaultValue: 'default', description: 'Target Namespace (없으면 자동 생성)', trim: true)
+                            ]
+                        )
+                        
+                        def selectedCluster = userInput['DEST_SERVER']
+                        def targetNamespace = userInput['TARGET_NAMESPACE']
+                        
+                        echo "Selected Cluster: ${selectedCluster}"
+                        echo "Target Namespace: ${targetNamespace}"
+
+
+                        // 4. 선택된 클러스터 및 네임스페이스로 앱 생성 및 배포
+                        sh """
+                            ./argocd app create ${APP_NAME} \
+                                --repo ${GITOPS_REPO_URL} \
+                                --revision main \
+                                --path . \
+                                --dest-server ${selectedCluster} \
+                                --dest-namespace ${targetNamespace} \
+                                --sync-option CreateNamespace=true \
+                                --upsert \
+                                --plaintext \
+                                --grpc-web
+
+                            ./argocd app sync ${APP_NAME} \
+                                --plaintext \
+                                --grpc-web
+                                
+                            ./argocd app wait ${APP_NAME} \
+                                --health \
+                                --plaintext \
+                                --grpc-web \
+                                --timeout 300
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
