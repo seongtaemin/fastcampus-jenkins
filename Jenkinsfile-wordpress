@@ -38,26 +38,62 @@ pipeline {
                     echo "Harbor URL: ${HARBOR_URL}"
                     echo "ArgoCD Server: ${ARGOCD_SERVER}"
                     
-                    // GitOps 리포지토리에서 YAML 파일의 주석(# upstream-version: X.Y)으로부터 버전 추출
+                    // GitOps 리포지토리 클론
                     sh "rm -rf gitops-repo && git clone ${GITOPS_REPO_URL} gitops-repo"
                     
-                    // grep으로 주석 부분 추출 -> awk로 버전 값만 분리 -> tr로 따옴표/공백 제거
-                    env.WORDPRESS_VERSION = sh(
-                        script: "grep 'upstream-version:' gitops-repo/wordpress.yaml | awk -F 'upstream-version:' '{print \$2}' | tr -d ' \"'",
+                    // 모든 YAML 파일에서 image: 항목을 재귀적으로 탐색하여 이미지 이름과 버전 추출
+                    // 형식: "파일경로|이미지이름|버전" (한 줄에 하나씩)
+                    def imageLines = sh(
+                        script: '''
+                            find gitops-repo -name "*.yaml" -o -name "*.yml" | while read yamlFile; do
+                                grep -n 'image:' "$yamlFile" | while IFS=: read lineNum lineContent; do
+                                    # image: 뒤의 값 추출 (주석 제거)
+                                    imageValue=$(echo "$lineContent" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'')
+                                    
+                                    # 이미지이름:태그 형식에서 분리
+                                    if echo "$imageValue" | grep -q ':'; then
+                                        # 레지스트리/프로젝트 경로 제거 후 순수 이미지 이름만 추출
+                                        imageFull=$(echo "$imageValue" | rev | cut -d'/' -f1 | rev)
+                                        imageName=$(echo "$imageFull" | cut -d':' -f1)
+                                        imageTag=$(echo "$imageFull" | cut -d':' -f2)
+                                        relPath=$(echo "$yamlFile" | sed 's|^gitops-repo/||')
+                                        echo "${relPath}|${imageName}|${imageTag}"
+                                    fi
+                                done
+                            done
+                        ''',
                         returnStdout: true
                     ).trim()
                     
-                    env.MYSQL_VERSION = sh(
-                        script: "grep 'upstream-version:' gitops-repo/mysql.yaml | awk -F 'upstream-version:' '{print \$2}' | tr -d ' \"'",
-                        returnStdout: true
-                    ).trim()
+                    // 파싱 결과를 Groovy Map으로 변환
+                    // IMAGE_MAP: [ [file: 'wordpress.yaml', name: 'wordpress', version: '6.0'], ... ]
+                    def imageMap = []
+                    if (imageLines) {
+                        imageLines.split('\n').each { line ->
+                            def parts = line.trim().split('\\|')
+                            if (parts.length == 3) {
+                                imageMap.add([
+                                    file: parts[0],
+                                    name: parts[1],
+                                    version: parts[2]
+                                ])
+                            }
+                        }
+                    }
                     
-                    echo "WordPress Source Version: ${env.WORDPRESS_VERSION}"
-                    echo "MySQL Source Version: ${env.MYSQL_VERSION}"
-                    echo "WordPress Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.BUILD_NUMBER}"
-                    echo "MySQL Harbor Image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.BUILD_NUMBER}"
-
-
+                    if (imageMap.isEmpty()) {
+                        error "GitOps 리포지토리에서 image 항목을 찾을 수 없습니다."
+                    }
+                    
+                    // 결과 출력
+                    echo "========== 발견된 이미지 목록 =========="
+                    imageMap.each { img ->
+                        echo "  파일: ${img.file} | 이미지: ${img.name} | 버전: ${img.version}"
+                    }
+                    echo "========================================"
+                    
+                    // 파이프라인 전체에서 사용할 수 있도록 저장
+                    env.IMAGE_MAP_JSON = groovy.json.JsonOutput.toJson(imageMap)
                 }
             }
         }
@@ -85,22 +121,21 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
+                    // JSON에서 이미지 맵 복원
+                    def imageMap = new groovy.json.JsonSlurper().parseText(env.IMAGE_MAP_JSON)
+                    
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
-                        sh """
-                            docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}
-
-                            # WordPress 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
-                            echo "=== WordPress 이미지 (${WORDPRESS_VERSION}) ==="
-                            docker pull wordpress:${WORDPRESS_VERSION}
-                            docker tag wordpress:${WORDPRESS_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION}
-                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION}
-                            
-                            # MySQL 이미지: 공식 레지스트리에서 pull → Harbor에 push (고정 버전 사용)
-                            echo "=== MySQL 이미지 (${MYSQL_VERSION}) ==="
-                            docker pull mysql:${MYSQL_VERSION}
-                            docker tag mysql:${MYSQL_VERSION} ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION}
-                            docker push ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION}
-                        """
+                        sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
+                        
+                        // 발견된 모든 이미지를 순회하면서 pull → tag → push
+                        imageMap.each { img ->
+                            echo "=== ${img.name} 이미지 (${img.version}) ==="
+                            sh """
+                                docker pull ${img.name}:${img.version}
+                                docker tag ${img.name}:${img.version} ${HARBOR_URL}/${HARBOR_PROJECT}/${img.name}:${img.version}
+                                docker push ${HARBOR_URL}/${HARBOR_PROJECT}/${img.name}:${img.version}
+                            """
+                        }
                     }
                 }
             }
@@ -109,11 +144,15 @@ pipeline {
         stage('Approval') {
             steps {
                 script {
+                    // 발견된 이미지 목록을 승인 메시지에 표시
+                    def imageMap = new groovy.json.JsonSlurper().parseText(env.IMAGE_MAP_JSON)
+                    def imageDesc = imageMap.collect { "${it.name}:${it.version}" }.join(', ')
+                    
                     def userInput = input(
                         id: 'Deploy', 
                         message: '배포하시겠습니까?', 
                         parameters: [
-                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: 'Docker Image ID: ' + env.BUILD_NUMBER, name: 'Proceed']
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: '이미지 목록: ' + imageDesc, name: 'Proceed']
                         ]
                     )
                 }
@@ -123,6 +162,9 @@ pipeline {
         stage('Argo Git Push') {
             steps {
                 script {
+                    // JSON에서 이미지 맵 복원
+                    def imageMap = new groovy.json.JsonSlurper().parseText(env.IMAGE_MAP_JSON)
+                    
                     withCredentials([
                         usernamePassword(credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASSWORD'),
                         usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')
@@ -135,16 +177,25 @@ pipeline {
                             git clone ${GITOPS_REPO_URL} gitops-repo
                             
                             cd gitops-repo
-                            
-                            # wordpress.yaml의 image 태그를 고정 버전으로 변경 (주석은 유지)
-                            sed -i "s|image: .*wordpress:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/wordpress:${env.WORDPRESS_VERSION} # upstream-version: ${env.WORDPRESS_VERSION}|" wordpress.yaml
-                            
-                            # mysql.yaml의 image 태그를 고정 버전으로 변경 (주석은 유지)
-                            sed -i "s|image: .*mysql:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/mysql:${env.MYSQL_VERSION} # upstream-version: ${env.MYSQL_VERSION}|" mysql.yaml
+                        """
+                        
+                        // 발견된 모든 이미지에 대해 YAML 파일의 image 태그를 Harbor 이미지로 변경
+                        imageMap.each { img ->
+                            sh """
+                                cd gitops-repo
+                                sed -i 's|image: .*${img.name}:.*|image: ${HARBOR_URL}/${HARBOR_PROJECT}/${img.name}:${img.version} # upstream-version: ${img.version}|' ${img.file}
+                            """
+                        }
+                        
+                        // 변경된 YAML 파일 목록 수집
+                        def changedFiles = imageMap.collect { it.file }.unique().join(' ')
+                        
+                        sh """
+                            cd gitops-repo
                             
                             # Generate harbor-credentials.yaml for ArgoCD to manage
                             AUTH=\$(echo -n "\${HARBOR_USER}:\${HARBOR_PASSWORD}" | base64)
-                            DOCKER_CONFIG_JSON="{\\"auths\\":{\\"${HARBOR_URL}\\":{\\"auth\\":\\"\${AUTH}\\"}}}"
+                            DOCKER_CONFIG_JSON="{\\\"auths\\\":{\\\"${HARBOR_URL}\\\":{\\\"auth\\\":\\\"\${AUTH}\\\"}}}"
                             DOCKER_CONFIG_BASE64=\$(echo -n "\${DOCKER_CONFIG_JSON}" | base64 -w 0)
                             
                             cat <<EOF > harbor-credentials.yaml
@@ -157,7 +208,7 @@ data:
   .dockerconfigjson: \${DOCKER_CONFIG_BASE64}
 EOF
                             
-                            git add wordpress.yaml mysql.yaml harbor-credentials.yaml
+                            git add ${changedFiles} harbor-credentials.yaml
                             # 변경사항이 있을 때만 커밋
                             git diff --quiet && git diff --staged --quiet || git commit -m "Ensure Manifests and Harbor Credentials"
                             
