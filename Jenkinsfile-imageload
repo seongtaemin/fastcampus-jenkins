@@ -11,21 +11,24 @@ pipeline {
         stage('Initialize & Scan Images') {
             steps {
                 script {
-                    echo "gs-kubeflow 프로젝트의 YAML 파일에서 이미지를 검색합니다..."
+                    def userInput = input(
+                        message: 'Enter Source Repository to Scan', 
+                        parameters: [
+                            string(defaultValue: 'https://github.com/seongtaemin/.git', description: 'GitHub Repository URL', name: 'SOURCE_REPO_URL')
+                        ]
+                    )
+                    env.SOURCE_REPO_URL = userInput
                     
-                    // 현재 디렉토리(Jenkins Workspace)의 모든 파일에서 image: 패턴 추출
-                    // 형식: "원본이미지|이미지명|태그"
+                    echo "Cloning ${env.SOURCE_REPO_URL} to scan for images..."
+                    sh "rm -rf target-repo && git clone ${env.SOURCE_REPO_URL} target-repo"
+                    
+                    // target-repo 내의 모든 파일에서 image: 패턴 추출
                     def imageLines = sh(
                         script: '''
-                            # 'image:' 가 포함된 모든 라인을 찾고, 주석이나 빈 값을 제외한 이미지 주소 추출
-                            grep -r "image:" . | grep -v "Jenkinsfile" | while read -r line; do
-                                # 파일 경로와 내용을 분리하고 image: 뒤의 값만 정리
+                            grep -r "image:" target-repo | grep -v ".git" | while read -r line; do
                                 imageValue=$(echo "$line" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'[:space:]')
                                 
-                                # 태그(:)가 포함된 유효한 이미지 주소인 경우만 처리
                                 if [ ! -z "$imageValue" ] && echo "$imageValue" | grep -q ':'; then
-                                    # 전체 주소에서 레지스트리 경로를 제외한 마지막 이미지명과 태그 추출
-                                    # 예: public.ecr.aws/j1e1w1v1/kubeflow/training-operator:v1.3.0 -> training-operator:v1.3.0
                                     imageFull=$(echo "$imageValue" | rev | cut -d'/' -f1 | rev)
                                     imageName=$(echo "$imageFull" | cut -d':' -f1)
                                     imageTag=$(echo "$imageFull" | cut -d':' -f2)
@@ -38,10 +41,9 @@ pipeline {
                     ).trim()
                     
                     if (!imageLines) {
-                        error "검색된 이미지가 없습니다. 워크스페이스에 YAML 파일이 저장되어 있는지 확인하세요."
+                        error "검색된 이미지가 없습니다. 레포지토리에 YAML 파일이 있는지 확인하세요."
                     }
                     
-                    // 이미지 목록을 환경 변수에 저장 (세미콜론 구분)
                     env.IMAGE_LIST_STR = imageLines.split('\n').collect { it.trim() }.findAll { it }.join(';')
                     
                     echo "========== 발견된 이미지 목록 =========="
