@@ -1,0 +1,99 @@
+pipeline {
+    agent any
+
+    environment {
+        // Harbor 설정
+        HARBOR_URL = 'harbor.kolon.local'
+        HARBOR_PROJECT = 'library'
+    }
+
+    stages {
+        stage('Initialize & Scan Images') {
+            steps {
+                script {
+                    echo "gs-kubeflow 프로젝트의 YAML 파일에서 이미지를 검색합니다..."
+                    
+                    // 현재 디렉토리(Jenkins Workspace)의 모든 파일에서 image: 패턴 추출
+                    // 형식: "원본이미지|이미지명|태그"
+                    def imageLines = sh(
+                        script: '''
+                            # 'image:' 가 포함된 모든 라인을 찾고, 주석이나 빈 값을 제외한 이미지 주소 추출
+                            grep -r "image:" . | grep -v "Jenkinsfile" | while read -r line; do
+                                # 파일 경로와 내용을 분리하고 image: 뒤의 값만 정리
+                                imageValue=$(echo "$line" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'[:space:]')
+                                
+                                # 태그(:)가 포함된 유효한 이미지 주소인 경우만 처리
+                                if [ ! -z "$imageValue" ] && echo "$imageValue" | grep -q ':'; then
+                                    # 전체 주소에서 레지스트리 경로를 제외한 마지막 이미지명과 태그 추출
+                                    # 예: public.ecr.aws/j1e1w1v1/kubeflow/training-operator:v1.3.0 -> training-operator:v1.3.0
+                                    imageFull=$(echo "$imageValue" | rev | cut -d'/' -f1 | rev)
+                                    imageName=$(echo "$imageFull" | cut -d':' -f1)
+                                    imageTag=$(echo "$imageFull" | cut -d':' -f2)
+                                    
+                                    echo "${imageValue}|${imageName}|${imageTag}"
+                                fi
+                            done | sort -u
+                        ''',
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (!imageLines) {
+                        error "검색된 이미지가 없습니다. 워크스페이스에 YAML 파일이 저장되어 있는지 확인하세요."
+                    }
+                    
+                    // 이미지 목록을 환경 변수에 저장 (세미콜론 구분)
+                    env.IMAGE_LIST_STR = imageLines.split('\n').collect { it.trim() }.findAll { it }.join(';')
+                    
+                    echo "========== 발견된 이미지 목록 =========="
+                    env.IMAGE_LIST_STR.split(';').each { entry ->
+                        def parts = entry.split('\\|')
+                        if (parts.length == 3) {
+                            echo "  [검색됨] ${parts[0]}  ==>  [대상] ${HARBOR_URL}/${HARBOR_PROJECT}/${parts[1]}:${parts[2]}"
+                        }
+                    }
+                    echo "========================================"
+                }
+            }
+        }
+
+        stage('Mirror to Harbor') {
+            steps {
+                script {
+                    // Harbor 인증 자격 증명 사용
+                    withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                        sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
+                        
+                        env.IMAGE_LIST_STR.split(';').each { entry ->
+                            def parts = entry.split('\\|')
+                            if (parts.length == 3) {
+                                def sourceImage = parts[0]
+                                def targetName = parts[1]
+                                def targetTag = parts[2]
+                                def targetFull = "${HARBOR_URL}/${HARBOR_PROJECT}/${targetName}:${targetTag}"
+                                
+                                echo ">>> Processing: ${sourceImage}"
+                                try {
+                                    sh "docker pull ${sourceImage}"
+                                    sh "docker tag ${sourceImage} ${targetFull}"
+                                    sh "docker push ${targetFull}"
+                                    echo ">>> Successfully mirrored to ${targetFull}"
+                                } catch (Exception e) {
+                                    echo "!!! Failed to process ${sourceImage}: ${e.getMessage()}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "작업이 완료되었습니다."
+            script {
+                sh "docker logout ${HARBOR_URL}"
+            }
+        }
+    }
+}
