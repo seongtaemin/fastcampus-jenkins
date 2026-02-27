@@ -14,7 +14,7 @@ pipeline {
                     def userInput = input(
                         message: 'Enter Source Repository to Scan', 
                         parameters: [
-                            string(defaultValue: 'https://github.com/seongtaemin/.git', description: 'GitHub Repository URL', name: 'SOURCE_REPO_URL')
+                            string(defaultValue: 'https://github.com/seongtaemin/gs-kubeflow.git', description: 'GitHub Repository URL', name: 'SOURCE_REPO_URL')
                         ]
                     )
                     env.SOURCE_REPO_URL = userInput
@@ -22,26 +22,39 @@ pipeline {
                     echo "Cloning ${env.SOURCE_REPO_URL} to scan for images..."
                     sh "rm -rf target-repo && git clone ${env.SOURCE_REPO_URL} target-repo"
                     
-                    // target-repo 내의 모든 파일에서 image: 패턴 추출
+                    // target-repo 내의 모든 파일에서 image: 패턴 추출 및 정제
                     def imageLines = sh(
                         script: '''
-                            grep -r "image:" target-repo | grep -v ".git" | while read -r line; do
+                            # 'image:' 키워드 검색 (공백 포함)
+                            grep -rE "[[:space:]]image:|^image:" target-repo | grep -v ".git" | while read -r line; do
+                                # image: 뒤의 값 추출 (주석, 따옴표 제거)
                                 imageValue=$(echo "$line" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'[:space:]')
                                 
-                                if [ ! -z "$imageValue" ] && echo "$imageValue" | grep -q ':'; then
-                                    imageFull=$(echo "$imageValue" | rev | cut -d'/' -f1 | rev)
-                                    imageName=$(echo "$imageFull" | cut -d':' -f1)
-                                    imageTag=$(echo "$imageFull" | cut -d':' -f2)
-                                    
-                                    echo "${imageValue}|${imageName}|${imageTag}"
+                                # 유효성 검사 (빈 값 제외)
+                                if [ -z "$imageValue" ] || [ "$imageValue" == "''" ] || [ "$imageValue" == '""' ]; then
+                                    continue
                                 fi
+                                
+                                # 마지막 슬래시 뒤의 파일명:태그 부분 추출 (예: gcr.io/api:v1 -> api:v1)
+                                nameAndTag=$(echo "$imageValue" | awk -F/ '{print $NF}')
+                                
+                                if echo "$nameAndTag" | grep -q ':'; then
+                                    imageName=$(echo "$nameAndTag" | cut -d':' -f1)
+                                    imageTag=$(echo "$nameAndTag" | cut -d':' -f2)
+                                else
+                                    imageName="$nameAndTag"
+                                    imageTag="latest"
+                                fi
+                                
+                                # 결과 출력 (중복 제거를 위해 sort -u로 전달)
+                                echo "${imageValue}|${imageName}|${imageTag}"
                             done | sort -u
                         ''',
                         returnStdout: true
                     ).trim()
                     
                     if (!imageLines) {
-                        error "검색된 이미지가 없습니다. 레포지토리에 YAML 파일이 있는지 확인하세요."
+                        error "검색된 유효한 이미지가 없습니다. 레포지토리에 YAML 파일(image: ...)이 있는지 확인하세요."
                     }
                     
                     env.IMAGE_LIST_STR = imageLines.split('\n').collect { it.trim() }.findAll { it }.join(';')
