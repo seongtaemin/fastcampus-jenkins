@@ -59,8 +59,8 @@ pipeline {
                             def matcher = (content =~ /(-?\s*)(image|newName|newTag|name)\s*:\s*(.*)/)
                             if (matcher.find()) {
                                 def key = matcher.group(2)
-                                // [:space:] 대신 \\s 를 사용하여 알파벳(a, p, s 등)이 지워지는 문제 해결
-                                def val = matcher.group(3).replaceAll(/['"\\s]/, "").split('#')[0]
+                                // Slashy string(/.../) 대신 표준 문자열("")을 사용하여 's' 문자가 지워지는 버그 수정
+                                def val = matcher.group(3).replaceAll("['\"\\s]", "").split('#')[0]
                                 if (!val) return
 
                                 if (!currentItem[file]) currentItem[file] = [:]
