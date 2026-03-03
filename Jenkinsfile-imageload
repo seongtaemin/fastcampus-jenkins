@@ -127,6 +127,7 @@ pipeline {
         stage('Mirror to Harbor') {
             steps {
                 script {
+                    def summaryLines = []
                     withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
                         sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
                         
@@ -138,18 +139,20 @@ pipeline {
                                 def targetTag = parts[2]
                                 def targetFull = "${HARBOR_URL}/${HARBOR_PROJECT}/${targetName}:${targetTag}"
                                 
-                                echo ">>> Processing: ${sourceImage}"
                                 try {
+                                    echo ">>> Processing image: ${sourceImage}"
                                     sh "docker pull ${sourceImage}"
                                     sh "docker tag ${sourceImage} ${targetFull}"
                                     sh "docker push ${targetFull}"
-                                    echo ">>> Successfully mirrored to ${targetFull}"
+                                    summaryLines << "[성공] ${sourceImage}  ==>  ${targetFull}"
                                 } catch (Exception e) {
-                                    echo "!!! Failed to process ${sourceImage}: ${e.getMessage()}"
+                                    echo "!!! Failed to process ${sourceImage}"
+                                    summaryLines << "[실패] ${sourceImage}  ==>  (이유: ${e.message.take(50)}...)"
                                 }
                             }
                         }
                     }
+                    env.FINAL_SUMMARY = summaryLines.join('\n')
                 }
             }
         }
@@ -157,8 +160,15 @@ pipeline {
 
     post {
         always {
-            echo "작업이 완료되었습니다."
             script {
+                echo """
+================================================================================
+💠 IMAGE MIRRORING FINAL SUMMARY 💠
+================================================================================
+${env.FINAL_SUMMARY ?: '처리된 이미지가 없습니다.'}
+================================================================================
+작업이 완료되었습니다.
+"""
                 sh "docker logout ${HARBOR_URL}"
                 sh "rm -rf target-repo"
             }
