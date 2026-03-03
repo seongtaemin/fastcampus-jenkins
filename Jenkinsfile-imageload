@@ -59,7 +59,8 @@ pipeline {
                             def matcher = (content =~ /(-?\s*)(image|newName|newTag|name)\s*:\s*(.*)/)
                             if (matcher.find()) {
                                 def key = matcher.group(2)
-                                def val = matcher.group(3).replaceAll(/['"[:space:]]/, "").split('#')[0]
+                                // [:space:] 대신 \\s 를 사용하여 알파벳(a, p, s 등)이 지워지는 문제 해결
+                                def val = matcher.group(3).replaceAll(/['"\\s]/, "").split('#')[0]
                                 if (!val) return
 
                                 if (!currentItem[file]) currentItem[file] = [:]
