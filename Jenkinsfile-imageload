@@ -22,12 +22,12 @@ pipeline {
                     echo "Cloning ${env.SOURCE_REPO_URL} to scan for images..."
                     sh "rm -rf target-repo && git clone ${env.SOURCE_REPO_URL} target-repo"
                     
-                    // target-repo 내의 모든 파일에서 image: 패턴 추출 및 정제
+                    // target-repo 내의 모든 파일에서 "image:" 키워드가 포함된 라인 추출
                     def imageLines = sh(
                         script: '''
-                            # 'image:' 키워드 검색 (공백 포함)
-                            grep -rE "[[:space:]]image:|^image:" target-repo | grep -v ".git" | while read -r line; do
-                                # image: 뒤의 값 추출 (주석, 따옴표 제거)
+                            # "image:" 키워드를 포함한 모든 파일 스캔 (필드명 구분 없이 스캔)
+                            grep -r "image:" target-repo | grep -v ".git" | while read -r line; do
+                                # image: 키워드 뒤의 이미지 주소 추출 (주석, 따옴표 제거)
                                 imageValue=$(echo "$line" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'[:space:]')
                                 
                                 # 유효성 검사 (빈 값 제외)
@@ -35,7 +35,7 @@ pipeline {
                                     continue
                                 fi
                                 
-                                # 마지막 슬래시 뒤의 파일명:태그 부분 추출 (예: gcr.io/api:v1 -> api:v1)
+                                # 마지막 슬래시 뒤의 파일명:태그 부분 추출
                                 nameAndTag=$(echo "$imageValue" | awk -F/ '{print $NF}')
                                 
                                 if echo "$nameAndTag" | grep -q ':'; then
