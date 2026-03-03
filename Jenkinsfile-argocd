@@ -29,12 +29,18 @@ pipeline {
     // "Build with Parameters" 클릭 시 아래 항목들이 UI에 표시됨
     // KUBECONFIG_FILE: Browse 버튼으로 kubeconfig.yaml 파일 선택
     parameters {
-        // ★ 파일 업로드 파라미터
-        //   빌드 실행 시 Browse 버튼이 나타나고 파일 선택 가능
-        //   선택한 파일은 워크스페이스의 'KUBECONFIG_FILE' 경로에 저장됨
-        file(
-            name: 'KUBECONFIG_FILE',
-            description: '배포 대상 K8s 클러스터의 kubeconfig.yaml 파일을 선택하세요 (Browse 버튼 클릭)'
+        // ★ kubeconfig Credential 선택 파라미터
+        //   사전 준비: Manage Jenkins → Credentials → Add Credential
+        //     - Kind: Secret file
+        //     - File: kubeconfig.yaml 파일 업로드
+        //     - ID: 원하는 이름 (예: managed-cluster01-kubeconfig)
+        //   빌드 시 드롭다운에서 등록된 Credential 선택
+        credentials(
+            name: 'KUBECONFIG_CREDENTIAL_ID',
+            description: '배포 대상 클러스터 kubeconfig (Jenkins Credential - Secret file 타입)',
+            defaultValue: '',
+            credentialType: 'org.jenkinsci.plugins.plaincredentials.impl.FileCredentialsImpl',
+            required: true
         )
         string(
             name: 'RELEASE_NAME',
@@ -91,23 +97,21 @@ pipeline {
                     env.ARGOCD_NAMESPACE  = params.ARGOCD_NAMESPACE?.trim()  ?: 'argocd'
                     env.ARGOCD_NODEPORT   = params.ARGOCD_NODEPORT?.trim()   ?: '30002'
                     env.SKIP_IMAGE_MIRROR = params.SKIP_IMAGE_MIRROR.toString()
+                    env.KUBECONFIG_CRED   = params.KUBECONFIG_CREDENTIAL_ID
 
-                    // ── kubeconfig 파일 내용 읽기 ─────────────────
-                    // Jenkins file 파라미터는 디스크에 파일을 쓰지 않고
-                    // params.KUBECONFIG_FILE 에 파일 내용(String)으로 전달됨
-                    def kubeconfigContent = params.KUBECONFIG_FILE
-
-                    if (!kubeconfigContent?.trim()) {
-                        error """
-kubeconfig 파일이 업로드되지 않았습니다.
-"Build with Parameters" 화면의 KUBECONFIG_FILE 항목에서
-[Browse] 버튼으로 kubeconfig.yaml 파일을 선택한 후 빌드를 실행하세요.
-"""
+                    if (!env.KUBECONFIG_CRED?.trim()) {
+                        error "kubeconfig Credential이 선택되지 않았습니다.\nBuild with Parameters 에서 KUBECONFIG_CREDENTIAL_ID를 선택하세요."
                     }
 
-                    // 파일 내용을 워크스페이스에 저장
-                    writeFile file: 'target-kubeconfig.yaml', text: kubeconfigContent
-                    echo ">>> kubeconfig 파일 내용 저장 완료"
+                    // ── Secret file Credential로 kubeconfig 접근 ──
+                    // Manage Jenkins → Credentials 에 등록된 Secret file Credential 사용
+                    withCredentials([file(
+                        credentialsId: env.KUBECONFIG_CRED,
+                        variable: 'KUBECONFIG_PATH'
+                    )]) {
+                        sh "cp \${KUBECONFIG_PATH} target-kubeconfig.yaml"
+                        echo ">>> kubeconfig 파일 복사 완료 (Credential: ${env.KUBECONFIG_CRED})"
+                    }
 
                     // ── kubeconfig 유효성 검증 ───────────────────
                     sh """
@@ -130,6 +134,7 @@ kubeconfig 파일이 업로드되지 않았습니다.
                 }
             }
         }
+
 
         // ────────────────────────────────────────────────────────
         // Stage 2. Fetch Latest Versions
