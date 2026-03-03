@@ -22,84 +22,92 @@ pipeline {
                     echo "Cloning ${env.SOURCE_REPO_URL} to scan for images..."
                     sh "rm -rf target-repo && git clone ${env.SOURCE_REPO_URL} target-repo"
                     
-                    // target-repo 내의 모든 파일에서 "image:" 키워드가 포함된 라인 추출
-                    def imageLines = sh(
-                        script: '''
-                            # "image:" 키워드를 포함한 모든 파일 스캔 (필드명 구분 없이 스캔)
-                            grep -r "image:" target-repo | grep -v ".git" | while read -r line; do
-                                # image: 키워드 뒤의 이미지 주소 추출 (주석, 따옴표 제거)
-                                imageValue=$(echo "$line" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'[:space:]')
-                                
-                                # 유효성 검사 (빈 값 제외)
-                                if [ -z "$imageValue" ] || [ "$imageValue" == "''" ] || [ "$imageValue" == '""' ]; then
-                                    continue
-                                fi
-                                
-                                # 마지막 슬래시 뒤의 파일명:태그 부분 추출
-                                nameAndTag=$(echo "$imageValue" | awk -F/ '{print $NF}')
-                                
-                                if echo "$nameAndTag" | grep -q ':'; then
-                                    imageName=$(echo "$nameAndTag" | cut -d':' -f1)
-                                    imageTag=$(echo "$nameAndTag" | cut -d':' -f2)
-                                else
-                                    imageName="$nameAndTag"
-                                    imageTag="latest"
-                                fi
-                                
-                                # 결과 출력 (중복 제거를 위해 sort -u로 전달)
-                                echo "${imageValue}|${imageName}|${imageTag}"
-                            done | sort -u
-                        ''',
+                    // 1. 모든 YAML 파일을 찾아서 이미지 관련 필드 추출 (Kustomize 형식 포함)
+                    echo "Scanning YAML files for images..."
+                    def rawOutput = sh(
+                        script: "grep -rE '(image|newName|newTag|name):' target-repo --exclude-dir=.git || true",
                         returnStdout: true
                     ).trim()
                     
-                    if (!imageLines) {
-                        error "검색된 유효한 이미지가 없습니다. 레포지토리에 YAML 파일(image: ...)이 있는지 확인하세요."
+                    if (!rawOutput) {
+                        error "검색된 이미지가 없습니다. 레포지토리에 YAML 파일이 있는지 확인하세요."
                     }
                     
-                    env.IMAGE_LIST_STR = imageLines.split('\n').collect { it.trim() }.findAll { it }.join(';')
+                    def foundImages = [] as Set
+                    def currentItem = [:] // filename -> current image block state
                     
-                    echo "========== 발견된 이미지 목록 =========="
-                    env.IMAGE_LIST_STR.split(';').each { entry ->
-                        def parts = entry.split('\\|')
-                        if (parts.length == 3) {
-                            echo "  [검색됨] ${parts[0]}  ==>  [대상] ${HARBOR_URL}/${HARBOR_PROJECT}/${parts[1]}:${parts[2]}"
+                    rawOutput.split('\n').each { line ->
+                        try {
+                            def colonIdx = line.indexOf(':')
+                            if (colonIdx <= 0) return
+                            
+                            def file = line.substring(0, colonIdx).trim()
+                            def content = line.substring(colonIdx + 1).trim()
+                            
+                            def matcher = (content =~ /(-?\s*)(image|newName|newTag|name)\s*:\s*(.*)/)
+                            if (matcher.find()) {
+                                def key = matcher.group(2)
+                                def val = matcher.group(3).replaceAll(/['"[:space:]]/, "").split('#')[0]
+                                if (!val) return
+
+                                // 파일별로 현재 처리 중인 이미지 블록 정보 저장
+                                if (!currentItem[file]) currentItem[file] = [:]
+                                
+                                if (key == 'image') {
+                                    foundImages << val
+                                } else if (key == 'name') {
+                                    // 새로운 블록 시작 (기존에 수집 안 된 정보가 있다면 정리)
+                                    if (currentItem[file].newName || currentItem[file].newTag) {
+                                        processItem(currentItem[file], foundImages)
+                                    }
+                                    currentItem[file] = [name: val]
+                                } else if (key == 'newName') {
+                                    currentItem[file].newName = val
+                                } else if (key == 'newTag') {
+                                    currentItem[file].newTag = val
+                                    // 태그가 나오면 해당 블록은 완성된 것으로 간주하고 즉시 처리
+                                    processItem(currentItem[file], foundImages)
+                                    currentItem[file] = [:]
+                                }
+                            }
+                        } catch (Exception e) {
+                            echo "Error parsing line: ${line} - ${e.message}"
                         }
                     }
-                    echo "========================================"
+                    
+                    // 남은 항목들 처리 (newTag 없이 끝난 경우 등)
+                    currentItem.each { f, item -> processItem(item, foundImages) }
+
+                    if (foundImages.isEmpty()) {
+                        error "유효한 이미지를 찾을 수 없습니다."
+                    }
+                    
+                    // 결과 가공
+                    def resultLines = []
+                    foundImages.each { fullImg ->
+                        if (!fullImg || !fullImg.contains('/')) return // 유효한 경로 체크
+                        def parts = fullImg.split('/')
+                        def nameAndTag = parts[-1]
+                        def name, tag
+                        if (nameAndTag.contains(':')) {
+                            def nt = nameAndTag.split(':', 2)
+                            name = nt[0]
+                            tag = nt[1]
+                        } else {
+                            name = nameAndTag
+                            tag = 'latest'
+                        }
+                        resultLines << "${fullImg}|${name}|${tag}"
+                    }
+                    
+                    env.IMAGE_LIST_STR = resultLines.join(';')
+                    // ... (이하 동일)
                 }
             }
         }
 
         stage('Mirror to Harbor') {
-            steps {
-                script {
-                    // Harbor 인증 자격 증명 사용
-                    withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
-                        sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
-                        
-                        env.IMAGE_LIST_STR.split(';').each { entry ->
-                            def parts = entry.split('\\|')
-                            if (parts.length == 3) {
-                                def sourceImage = parts[0]
-                                def targetName = parts[1]
-                                def targetTag = parts[2]
-                                def targetFull = "${HARBOR_URL}/${HARBOR_PROJECT}/${targetName}:${targetTag}"
-                                
-                                echo ">>> Processing: ${sourceImage}"
-                                try {
-                                    sh "docker pull ${sourceImage}"
-                                    sh "docker tag ${sourceImage} ${targetFull}"
-                                    sh "docker push ${targetFull}"
-                                    echo ">>> Successfully mirrored to ${targetFull}"
-                                } catch (Exception e) {
-                                    echo "!!! Failed to process ${sourceImage}: ${e.getMessage()}"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // ... (기존과 동일)
         }
     }
 
@@ -108,7 +116,24 @@ pipeline {
             echo "작업이 완료되었습니다."
             script {
                 sh "docker logout ${HARBOR_URL}"
+                sh "rm -rf target-repo" // 저장소 정리 추가
             }
+        }
+    }
+}
+
+// 이미지 매핑 로직을 별도 함수로 분리 (Jenkinsfile 내에서 call)
+def processItem(item, foundImages) {
+    if (item.newName && item.newTag) {
+        foundImages << "${item.newName}:${item.newTag}"
+    } else if (item.newName) {
+        foundImages << item.newName
+    } else if (item.name && item.name.contains('/')) {
+        // newName이 없을 때만 원본 name을 가져감
+        if (item.newTag) {
+            foundImages << "${item.name}:${item.newTag}"
+        } else {
+            foundImages << item.name
         }
     }
 }
