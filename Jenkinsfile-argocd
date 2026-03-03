@@ -503,6 +503,7 @@ pipeline {
                             ./argocd login \${ARGOCD_SERVER} \
                                 --username admin \
                                 --password \${ADMIN_PW} \
+                                --insecure \
                                 --plaintext \
                                 --grpc-web
 
@@ -516,13 +517,14 @@ pipeline {
                             echo ">>> ArgoCD에 클러스터 등록 중..."
                             ./argocd cluster add \${CONTEXT_NAME} \
                                 --kubeconfig=\${KUBECONFIG_PATH} \
+                                --insecure \
                                 --plaintext \
                                 --grpc-web \
                                 --yes
 
                             echo ""
                             echo "========== ArgoCD 등록된 클러스터 목록 =========="
-                            ./argocd cluster list --plaintext --grpc-web
+                            ./argocd cluster list --insecure --plaintext --grpc-web
                             echo "=================================================="
 
                             rm -f argocd /tmp/argocd-admin-pw /tmp/argocd-node-ip
