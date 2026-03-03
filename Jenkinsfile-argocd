@@ -1,0 +1,445 @@
+// ============================================================
+// Jenkinsfile-argocd
+//
+// 목적: 최신 ArgoCD 버전을 자동으로 감지하여 Harbor에 미러링 후
+//       업로드된 kubeconfig 기반의 K8s 클러스터에 Helm으로 배포
+//
+// 파이프라인 흐름:
+//   1. Initialize             : 배포 파라미터 입력 + kubeconfig 파일 업로드
+//   2. Fetch Latest Versions  : GitHub API / Helm 차트에서 최신 버전 자동 탐지
+//   3. Mirror Images          : 최신 이미지 Pull → Harbor Push
+//   4. Approval               : 최종 배포 승인
+//   5. Deploy ArgoCD          : Helm으로 대상 클러스터에 배포
+//
+// 전제 조건:
+//   - Jenkins 에이전트에 docker, helm, kubectl, python3, curl 설치 필요
+//   - Jenkins Credentials 등록:
+//       harbor-credentials  (Harbor ID/PW)
+//
+// ============================================================
+
+pipeline {
+    agent any
+
+    environment {
+        // ── Harbor 설정 ─────────────────────────────────────────
+        HARBOR_URL     = 'harbor.kolon.local'
+        HARBOR_PROJECT = 'library'
+
+        // ── Helm 레포 설정 (공식 ArgoCD Helm 레포) ──────────────
+        HELM_REPO_NAME  = 'argo'
+        HELM_REPO_URL   = 'https://argoproj.github.io/argo-helm'
+        HELM_CHART_NAME = 'argo-cd'
+    }
+
+    stages {
+
+        // ────────────────────────────────────────────────────────
+        // Stage 1. Initialize
+        //   - 릴리즈명, 네임스페이스, NodePort 등 사용자 입력
+        //   - kubeconfig.yaml 파일 업로드 (file 파라미터)
+        //   - 업로드된 kubeconfig 유효성 검증
+        // ────────────────────────────────────────────────────────
+        stage('Initialize') {
+            steps {
+                script {
+                    echo "=== ArgoCD 배포 파이프라인 시작 ==="
+
+                    // ── 1-1. 텍스트 파라미터 입력 ─────────────────
+                    def textInput = input(
+                        id: 'TextParams',
+                        message: '[Step 1/2] ArgoCD 배포 설정을 입력하세요',
+                        parameters: [
+                            string(
+                                name: 'RELEASE_NAME',
+                                defaultValue: 'argocd',
+                                description: 'Helm 릴리즈 이름'
+                            ),
+                            string(
+                                name: 'ARGOCD_NAMESPACE',
+                                defaultValue: 'argocd',
+                                description: 'ArgoCD를 배포할 Kubernetes 네임스페이스',
+                                trim: true
+                            ),
+                            string(
+                                name: 'ARGOCD_NODEPORT',
+                                defaultValue: '30002',
+                                description: 'ArgoCD Server NodePort 번호 (30000-32767)',
+                                trim: true
+                            ),
+                            booleanParam(
+                                name: 'SKIP_IMAGE_MIRROR',
+                                defaultValue: false,
+                                description: '이미지가 이미 Harbor에 있으면 체크 (미러링 단계 건너뜀)'
+                            )
+                        ]
+                    )
+
+                    env.RELEASE_NAME       = textInput['RELEASE_NAME']
+                    env.ARGOCD_NAMESPACE   = textInput['ARGOCD_NAMESPACE']
+                    env.ARGOCD_NODEPORT    = textInput['ARGOCD_NODEPORT']
+                    env.SKIP_IMAGE_MIRROR  = textInput['SKIP_IMAGE_MIRROR'].toString()
+
+                    // ── 1-2. kubeconfig 파일 업로드 ───────────────
+                    // Jenkins의 file 파라미터: 사용자가 로컬 파일을 선택하여 업로드
+                    def kubeInput = input(
+                        id: 'KubeconfigUpload',
+                        message: '[Step 2/2] 배포 대상 클러스터의 kubeconfig.yaml 파일을 업로드하세요',
+                        parameters: [
+                            file(
+                                name: 'KUBECONFIG_FILE',
+                                description: '배포 대상 K8s 클러스터의 kubeconfig.yaml 파일'
+                            )
+                        ]
+                    )
+
+                    // 업로드된 파일을 워크스페이스에 저장
+                    writeFile(
+                        file: 'target-kubeconfig.yaml',
+                        text: kubeInput['KUBECONFIG_FILE'].getString('UTF-8')
+                    )
+
+                    // ── 1-3. kubeconfig 유효성 검증 ───────────────
+                    sh """
+                        echo ">>> 업로드된 kubeconfig 유효성 검증 중..."
+                        export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
+                        kubectl cluster-info --request-timeout=10s
+                        echo ">>> kubeconfig 검증 완료"
+                    """
+
+                    echo "──────────────────────────────────────────"
+                    echo "  릴리즈명      : ${env.RELEASE_NAME}"
+                    echo "  네임스페이스  : ${env.ARGOCD_NAMESPACE}"
+                    echo "  NodePort      : ${env.ARGOCD_NODEPORT}"
+                    echo "  이미지 미러링 : ${env.SKIP_IMAGE_MIRROR == 'true' ? '건너뜀 (기존 이미지 사용)' : '실행'}"
+                    echo "──────────────────────────────────────────"
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────
+        // Stage 2. Fetch Latest Versions
+        //   - GitHub API에서 ArgoCD 최신 릴리즈 버전 조회
+        //   - 공식 Helm 레포에서 최신 차트 Pull
+        //   - values.yaml 파싱으로 dex, redis 버전 자동 추출
+        // ────────────────────────────────────────────────────────
+        stage('Fetch Latest Versions') {
+            steps {
+                script {
+                    echo ">>> GitHub API에서 ArgoCD 최신 버전 조회 중..."
+
+                    // ── 2-1. GitHub API로 최신 ArgoCD 버전 조회 ───
+                    def argocdVersion = sh(
+                        script: '''
+                            curl -sSL \
+                                -H "Accept: application/vnd.github+json" \
+                                https://api.github.com/repos/argoproj/argo-cd/releases/latest \
+                                | grep '"tag_name"' \
+                                | head -1 \
+                                | cut -d'"' -f4
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!argocdVersion || !argocdVersion.startsWith('v')) {
+                        error "GitHub API에서 ArgoCD 버전 조회에 실패했습니다. (조회값: '${argocdVersion}')"
+                    }
+                    env.ARGOCD_VERSION = argocdVersion
+                    echo ">>> 최신 ArgoCD 버전: ${env.ARGOCD_VERSION}"
+
+                    // ── 2-2. Helm 레포 추가 및 최신 차트 Pull ──────
+                    sh """
+                        echo ">>> Helm 레포 추가 중: ${HELM_REPO_URL}"
+                        helm repo add ${HELM_REPO_NAME} ${HELM_REPO_URL} --force-update
+                        helm repo update
+
+                        echo ">>> 최신 ArgoCD Helm 차트 다운로드 중..."
+                        rm -rf argocd-chart
+                        helm pull ${HELM_REPO_NAME}/${HELM_CHART_NAME} \
+                            --untar \
+                            --untardir ./argocd-chart
+                    """
+
+                    // ── 2-3. 다운로드된 차트의 버전 확인 ─────────
+                    def chartAppVersion = sh(
+                        script: "grep '^appVersion:' ./argocd-chart/argo-cd/Chart.yaml | awk '{print \$2}'",
+                        returnStdout: true
+                    ).trim()
+
+                    def chartVersion = sh(
+                        script: "grep '^version:' ./argocd-chart/argo-cd/Chart.yaml | awk '{print \$2}'",
+                        returnStdout: true
+                    ).trim()
+
+                    echo ">>> Helm 차트 버전  : ${chartVersion}"
+                    echo ">>> Helm 차트 AppVersion: ${chartAppVersion}"
+
+                    // 차트 appVersion과 GitHub API 버전이 다른 경우 차트 기준 사용
+                    // (GitHub 릴리즈가 앞서거나 Helm 차트가 앞설 수 있음)
+                    env.ARGOCD_VERSION  = chartAppVersion ?: argocdVersion
+                    env.HELM_CHART_VER  = chartVersion
+
+                    // ── 2-4. Python3으로 values.yaml 파싱 ─────────
+                    // dex 이미지 태그 추출
+                    def dexVersion = sh(
+                        script: """
+                            python3 -c "
+import yaml
+with open('./argocd-chart/argo-cd/values.yaml') as f:
+    v = yaml.safe_load(f)
+print(v['dex']['image']['tag'])
+"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    // redis 이미지 태그 추출
+                    def redisVersion = sh(
+                        script: """
+                            python3 -c "
+import yaml
+with open('./argocd-chart/argo-cd/values.yaml') as f:
+    v = yaml.safe_load(f)
+print(v['redis']['image']['tag'])
+"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    // dex 이미지 레포 추출 (원본 레포 확인용)
+                    def dexRepo = sh(
+                        script: """
+                            python3 -c "
+import yaml
+with open('./argocd-chart/argo-cd/values.yaml') as f:
+    v = yaml.safe_load(f)
+print(v['dex']['image']['repository'])
+"
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    env.DEX_VERSION    = dexVersion
+                    env.DEX_REPO       = dexRepo        // e.g. ghcr.io/dex-idp/dex
+                    env.REDIS_VERSION  = redisVersion
+
+                    echo "────────────────────────────────────────────────"
+                    echo "  [배포 대상 이미지]"
+                    echo "  ArgoCD : quay.io/argoproj/argocd:${env.ARGOCD_VERSION}"
+                    echo "  Dex    : ${env.DEX_REPO}:${env.DEX_VERSION}"
+                    echo "  Redis  : redis:${env.REDIS_VERSION}"
+                    echo "  Harbor : ${HARBOR_URL}/${HARBOR_PROJECT}/"
+                    echo "  Helm   : ${HELM_REPO_NAME}/${HELM_CHART_NAME} (chart ${env.HELM_CHART_VER})"
+                    echo "────────────────────────────────────────────────"
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────
+        // Stage 3. Mirror Images to Harbor
+        //   - 인터넷에서 최신 ArgoCD 관련 이미지 Pull
+        //   - Harbor 레지스트리로 Push
+        //   - SKIP_IMAGE_MIRROR=true 면 건너뜀
+        // ────────────────────────────────────────────────────────
+        stage('Mirror Images to Harbor') {
+            when {
+                expression { env.SKIP_IMAGE_MIRROR != 'true' }
+            }
+            steps {
+                script {
+                    // 미러링할 이미지 목록: [소스 이미지, Harbor 저장 이름:태그]
+                    def imageList = [
+                        [
+                            "quay.io/argoproj/argocd:${env.ARGOCD_VERSION}",
+                            "argocd:${env.ARGOCD_VERSION}"
+                        ],
+                        [
+                            "${env.DEX_REPO}:${env.DEX_VERSION}",
+                            "dex:${env.DEX_VERSION}"
+                        ],
+                        [
+                            "redis:${env.REDIS_VERSION}",
+                            "redis:${env.REDIS_VERSION}"
+                        ]
+                    ]
+
+                    withCredentials([usernamePassword(
+                        credentialsId: 'harbor-credentials',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    )]) {
+                        sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
+
+                        def results = []
+
+                        imageList.each { pair ->
+                            def sourceImage = pair[0]
+                            def targetImage = "${HARBOR_URL}/${HARBOR_PROJECT}/${pair[1]}"
+
+                            echo ">>> 미러링 중: ${sourceImage}  →  ${targetImage}"
+                            try {
+                                sh """
+                                    docker pull ${sourceImage}
+                                    docker tag  ${sourceImage} ${targetImage}
+                                    docker push ${targetImage}
+                                    docker rmi  ${sourceImage} ${targetImage} || true
+                                """
+                                results << "[✅ 성공] ${sourceImage}  →  ${targetImage}"
+                            } catch (Exception e) {
+                                error "[❌ 실패] ${sourceImage} 미러링 오류: ${e.message}"
+                            }
+                        }
+
+                        sh "docker logout ${HARBOR_URL} || true"
+
+                        echo "========== 이미지 미러링 결과 =========="
+                        results.each { echo it }
+                        echo "========================================"
+                    }
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────
+        // Stage 4. Approval
+        //   - 실제 배포 전 최종 승인 요청
+        // ────────────────────────────────────────────────────────
+        stage('Approval') {
+            steps {
+                script {
+                    input(
+                        id: 'DeployApproval',
+                        message: """아래 설정으로 ArgoCD를 배포하시겠습니까?
+
+  릴리즈명     : ${env.RELEASE_NAME}
+  네임스페이스 : ${env.ARGOCD_NAMESPACE}
+  NodePort     : ${env.ARGOCD_NODEPORT}
+  ArgoCD 버전  : ${env.ARGOCD_VERSION}
+  Helm 차트    : ${env.HELM_CHART_VER}
+  이미지 레지  : ${HARBOR_URL}/${HARBOR_PROJECT}
+  argocd       : ${HARBOR_URL}/${HARBOR_PROJECT}/argocd:${env.ARGOCD_VERSION}
+  dex          : ${HARBOR_URL}/${HARBOR_PROJECT}/dex:${env.DEX_VERSION}
+  redis        : ${HARBOR_URL}/${HARBOR_PROJECT}/redis:${env.REDIS_VERSION}
+""",
+                        parameters: [
+                            booleanParam(
+                                name: 'Confirm',
+                                defaultValue: true,
+                                description: '배포를 진행하려면 체크하세요'
+                            )
+                        ]
+                    )
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────
+        // Stage 5. Deploy ArgoCD via Helm
+        //   - 업로드된 kubeconfig 를 사용하여 Helm으로 K8s 배포
+        //   - 이미지 경로를 --set 으로 Harbor로 덮어씌움
+        //   - imagePullSecret 자동 생성
+        //   - 배포 후 초기 admin 비밀번호 및 접속 URL 출력
+        // ────────────────────────────────────────────────────────
+        stage('Deploy ArgoCD via Helm') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'harbor-credentials',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    )]) {
+
+                        // ── 5-1. 네임스페이스 + imagePullSecret 생성 ─
+                        sh """
+                            export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
+
+                            echo ">>> 네임스페이스 생성 중: ${env.ARGOCD_NAMESPACE}"
+                            kubectl create namespace ${env.ARGOCD_NAMESPACE} \
+                                --dry-run=client -o yaml | kubectl apply -f -
+
+                            echo ">>> Harbor imagePullSecret 생성 중..."
+                            kubectl create secret docker-registry harbor-credentials \
+                                --namespace ${env.ARGOCD_NAMESPACE} \
+                                --docker-server=${HARBOR_URL} \
+                                --docker-username=\${HARBOR_USER} \
+                                --docker-password=\${HARBOR_PASSWORD} \
+                                --dry-run=client -o yaml | kubectl apply -f -
+                        """
+
+                        // ── 5-2. Helm으로 ArgoCD 배포 ────────────────
+                        // 다운로드된 최신 차트 + --set 으로 이미지를 Harbor로 교체
+                        sh """
+                            export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
+
+                            echo ">>> Helm으로 ArgoCD 배포 중..."
+                            helm upgrade --install ${env.RELEASE_NAME} ./argocd-chart/argo-cd \
+                                --namespace ${env.ARGOCD_NAMESPACE} \
+                                --create-namespace \
+                                --set global.image.repository=${HARBOR_URL}/${HARBOR_PROJECT}/argocd \
+                                --set global.image.tag=${env.ARGOCD_VERSION} \
+                                --set global.image.imagePullPolicy=IfNotPresent \
+                                --set global.imagePullSecrets[0].name=harbor-credentials \
+                                --set dex.image.repository=${HARBOR_URL}/${HARBOR_PROJECT}/dex \
+                                --set dex.image.tag=${env.DEX_VERSION} \
+                                --set redis.image.repository=${HARBOR_URL}/${HARBOR_PROJECT}/redis \
+                                --set redis.image.tag=${env.REDIS_VERSION} \
+                                --set server.service.type=NodePort \
+                                --set server.service.nodePortHttp=${env.ARGOCD_NODEPORT} \
+                                --set server.insecure=true \
+                                --wait \
+                                --timeout 10m \
+                                --atomic
+                        """
+
+                        // ── 5-3. 배포 결과 출력 ───────────────────────
+                        sh """
+                            export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
+
+                            echo ""
+                            echo "========== ArgoCD 파드 상태 =========="
+                            kubectl get pods -n ${env.ARGOCD_NAMESPACE} -o wide
+                            echo ""
+                            echo "========== ArgoCD 서비스 상태 =========="
+                            kubectl get svc -n ${env.ARGOCD_NAMESPACE}
+                            echo ""
+
+                            echo "========== ArgoCD 초기 Admin 비밀번호 =========="
+                            ADMIN_PW=\$(kubectl get secret argocd-initial-admin-secret \
+                                -n ${env.ARGOCD_NAMESPACE} \
+                                -o jsonpath='{.data.password}' | base64 -d)
+                            echo "  Password: \${ADMIN_PW}"
+                            echo "================================================"
+
+                            NODE_IP=\$(kubectl get nodes \
+                                -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+
+                            echo ""
+                            echo "========== ArgoCD 접속 정보 ===================="
+                            echo "  URL      : http://\${NODE_IP}:${env.ARGOCD_NODEPORT}"
+                            echo "  Username : admin"
+                            echo "  Password : \${ADMIN_PW}"
+                            echo "================================================"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // kubeconfig 보안 삭제 + 임시 파일 정리
+                sh "rm -f target-kubeconfig.yaml || true"
+                sh "rm -rf argocd-chart || true"
+                echo "=== 임시 파일 정리 완료 ==="
+            }
+        }
+        success {
+            echo "[✅ SUCCESS] ArgoCD ${env.ARGOCD_VERSION} 가 '${env.ARGOCD_NAMESPACE}' 네임스페이스에 성공적으로 배포되었습니다."
+        }
+        failure {
+            echo "[❌ FAILURE] 파이프라인 실행 중 오류가 발생했습니다. 위 로그를 확인하세요."
+        }
+    }
+}
