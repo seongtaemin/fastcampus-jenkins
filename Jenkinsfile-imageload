@@ -62,7 +62,8 @@ pipeline {
                             if (matcher.find()) {
                                 def key = matcher.group(2)
                                 def val = matcher.group(3).replaceAll("['\"\\s]", "").split('#')[0]
-                                if (!val) return
+                                // [수정] Helm 템플릿 변수 필터링 ({{...}}, $... 등 제외)
+                                if (!val || val.contains('{{') || val.contains('}}') || val.contains('$') || val.contains('.Values')) return
 
                                 if (!currentItem[file]) currentItem[file] = [:]
                                 
