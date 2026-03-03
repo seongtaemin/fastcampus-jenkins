@@ -508,7 +508,7 @@ pipeline {
                             echo ">>> 등록할 클러스터 컨텍스트: \${CONTEXT_NAME}"
 
                             echo ">>> ArgoCD에 클러스터 등록 중..."
-                            ./argocd cluster add \${CONTEXT_NAME} --y
+                            ./argocd cluster add \${CONTEXT_NAME}
 
                             echo ""
                             echo "========== ArgoCD 등록된 클러스터 목록 =========="
