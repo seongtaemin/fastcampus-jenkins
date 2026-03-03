@@ -32,7 +32,7 @@ pipeline {
         // ★ 파일 업로드 파라미터
         //   빌드 실행 시 Browse 버튼이 나타나고 파일 선택 가능
         //   선택한 파일은 워크스페이스의 'KUBECONFIG_FILE' 경로에 저장됨
-        fileParam(
+        file(
             name: 'KUBECONFIG_FILE',
             description: '배포 대상 K8s 클러스터의 kubeconfig.yaml 파일을 선택하세요 (Browse 버튼 클릭)'
         )
