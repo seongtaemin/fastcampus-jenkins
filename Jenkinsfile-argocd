@@ -493,38 +493,26 @@ pipeline {
                             ADMIN_PW=\$(cat /tmp/argocd-admin-pw | tr -d '\\n')
                             ARGOCD_SERVER="\${NODE_IP}:${env.ARGOCD_NODEPORT}"
 
-                            echo ">>> ArgoCD CLI 다운로드 (서버에서)..."
-                            curl -sSL -o argocd \
-                                --retry 3 --max-time 60 --insecure \
-                                http://\${ARGOCD_SERVER}/download/argocd-linux-amd64
+                            echo ">>> 1) Argo CD CLI 설치..."
+                            curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
                             chmod +x argocd
 
-                            echo ">>> ArgoCD 로그인..."
-                            ./argocd login \${ARGOCD_SERVER} \
-                                --username admin \
-                                --password \${ADMIN_PW} \
-                                --insecure \
-                                --plaintext \
-                                --grpc-web
+                            echo ">>> 2) 타겟 managed 클러스터 정보 등록..."
+                            ./argocd login \${ARGOCD_SERVER} --username admin --password \${ADMIN_PW} --insecure
 
                             echo ">>> kubeconfig 컨텍스트 목록 확인..."
-                            kubectl config get-contexts --kubeconfig=\${KUBECONFIG_PATH}
+                            kubectl config get-contexts
 
                             # kubeconfig의 current-context 이름 추출
-                            CONTEXT_NAME=\$(kubectl config current-context --kubeconfig=\${KUBECONFIG_PATH})
+                            CONTEXT_NAME=\$(kubectl config current-context)
                             echo ">>> 등록할 클러스터 컨텍스트: \${CONTEXT_NAME}"
 
                             echo ">>> ArgoCD에 클러스터 등록 중..."
-                            ./argocd cluster add \${CONTEXT_NAME} \
-                                --kubeconfig=\${KUBECONFIG_PATH} \
-                                --insecure \
-                                --plaintext \
-                                --grpc-web \
-                                --yes
+                            ./argocd cluster add \${CONTEXT_NAME} --y
 
                             echo ""
                             echo "========== ArgoCD 등록된 클러스터 목록 =========="
-                            ./argocd cluster list --insecure --plaintext --grpc-web
+                            ./argocd cluster list
                             echo "=================================================="
 
                             rm -f argocd /tmp/argocd-admin-pw /tmp/argocd-node-ip
