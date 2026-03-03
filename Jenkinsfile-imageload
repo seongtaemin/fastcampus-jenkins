@@ -38,7 +38,7 @@ pipeline {
                     
                     echo "Scanning YAML files for images..."
                     def rawOutput = sh(
-                        script: "grep -rE '(image|newName|newTag|name):' target-repo --exclude-dir=.git || true",
+                        script: "grep -rE '(image|newName|newTag|name|repository|tag):' target-repo --exclude-dir=.git || true",
                         returnStdout: true
                     ).trim()
                     
@@ -57,8 +57,8 @@ pipeline {
                             def file = line.substring(0, colonIdx).trim()
                             def content = line.substring(colonIdx + 1).trim()
                             
-                            // [수정] 정확한 키 매칭을 위해 바운더리(\\b) 추가 및 그룹 인덱스 조정
-                            def matcher = (content =~ /(-?\s*)\b(image|newName|newTag|name)\b\s*:\s*(.*)/)
+                            // [수정] Helm values.yaml 호환을 위해 repository, tag 추가
+                            def matcher = (content =~ /(-?\s*)\b(image|newName|newTag|name|repository|tag)\b\s*:\s*(.*)/)
                             if (matcher.find()) {
                                 def key = matcher.group(2)
                                 def val = matcher.group(3).replaceAll("['\"\\s]", "").split('#')[0]
@@ -70,14 +70,15 @@ pipeline {
                                 if (key == 'image') {
                                     // image 필드는 태그가 없어도 수집 (latest 시도)
                                     foundImages << val
-                                } else if (key == 'name') {
-                                    if (currentItem[file].newName || currentItem[file].newTag) {
+                                } else if (key == 'name' || key == 'repository' || key == 'newName') {
+                                    // 새로운 이미지 블록 설정
+                                    if (currentItem[file].newName || currentItem[file].newTag || currentItem[file].name) {
                                         processItem(currentItem[file], foundImages)
                                     }
-                                    currentItem[file] = [name: val]
-                                } else if (key == 'newName') {
-                                    currentItem[file].newName = val
-                                } else if (key == 'newTag') {
+                                    // repository와 newName은 동일하게 처리
+                                    if (key == 'name') currentItem[file] = [name: val]
+                                    else currentItem[file] = [newName: val]
+                                } else if (key == 'newTag' || key == 'tag') {
                                     currentItem[file].newTag = val
                                     processItem(currentItem[file], foundImages)
                                     currentItem[file] = [:]
