@@ -4,9 +4,10 @@ def processItem(item, foundImages) {
     } else if (item.newName) {
         foundImages << item.newName
     } else if (item.name && item.name.contains('/')) {
+        // newName이 없을 때 원본 name을 가져가되, 태그가 있는 경우만 안전하게 수집
         if (item.newTag) {
             foundImages << "${item.name}:${item.newTag}"
-        } else {
+        } else if (item.name.contains(':')) {
             foundImages << item.name
         }
     }
@@ -56,16 +57,17 @@ pipeline {
                             def file = line.substring(0, colonIdx).trim()
                             def content = line.substring(colonIdx + 1).trim()
                             
-                            def matcher = (content =~ /(-?\s*)(image|newName|newTag|name)\s*:\s*(.*)/)
+                            // [수정] 정확한 키 매칭을 위해 바운더리(\\b) 추가 및 그룹 인덱스 조정
+                            def matcher = (content =~ /(-?\s*)\b(image|newName|newTag|name)\b\s*:\s*(.*)/)
                             if (matcher.find()) {
                                 def key = matcher.group(2)
-                                // Slashy string(/.../) 대신 표준 문자열("")을 사용하여 's' 문자가 지워지는 버그 수정
                                 def val = matcher.group(3).replaceAll("['\"\\s]", "").split('#')[0]
                                 if (!val) return
 
                                 if (!currentItem[file]) currentItem[file] = [:]
                                 
                                 if (key == 'image') {
+                                    // image 필드는 태그가 없어도 수집 (latest 시도)
                                     foundImages << val
                                 } else if (key == 'name') {
                                     if (currentItem[file].newName || currentItem[file].newTag) {
