@@ -114,10 +114,40 @@ pipeline {
                     }
 
                     // ── kubeconfig 유효성 검증 ───────────────────
+                    // 필수 도구 사전 확인 (미설치 시 명확한 안내)
                     sh """
-                        echo ">>> 업로드된 kubeconfig 유효성 검증 중..."
+                        echo ">>> 필수 도구 설치 여부 확인..."
+                        MISSING=""
+                        command -v kubectl >/dev/null 2>&1 || MISSING="\${MISSING} kubectl"
+                        command -v helm    >/dev/null 2>&1 || MISSING="\${MISSING} helm"
+                        command -v docker  >/dev/null 2>&1 || MISSING="\${MISSING} docker"
+                        command -v curl    >/dev/null 2>&1 || MISSING="\${MISSING} curl"
+
+                        if [ -n "\${MISSING}" ]; then
+                            echo "=========================================="
+                            echo "[❌ 오류] Jenkins 에이전트에 필수 도구가 없습니다:"
+                            echo "  미설치 도구: \${MISSING}"
+                            echo ""
+                            echo "  설치 방법 (Jenkins 컨테이너):"
+                            echo "  docker exec -it --user root jenkins bash"
+                            echo ""
+                            echo "  # kubectl"
+                            echo "  curl -LO https://dl.k8s.io/release/\$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                            echo "  chmod +x kubectl && mv kubectl /usr/local/bin/"
+                            echo ""
+                            echo "  # helm"
+                            echo "  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+                            echo "=========================================="
+                            exit 1
+                        fi
+
+                        echo ">>> 모든 필수 도구 확인 완료"
+                        kubectl version --client --output=yaml | grep gitVersion
+                        helm version --short
+                        docker version --format '{{.Client.Version}}'
+
+                        echo ">>> kubeconfig 클러스터 연결 검증..."
                         export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
-                        kubectl version --client
                         kubectl cluster-info --request-timeout=10s
                         echo ""
                         echo ">>> 클러스터 노드 목록:"
