@@ -438,7 +438,7 @@ pipeline {
                                 --atomic
                         """
 
-                        // ── 5-3. 결과 + 접속 정보 출력 ──────────────
+                        // ── 5-3. 결과 + 접속 정보 출력 (1회) ────────
                         sh """
                             export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
 
@@ -450,28 +450,89 @@ pipeline {
                             kubectl get svc -n ${env.ARGOCD_NAMESPACE}
                             echo ""
 
-                            echo "========== 초기 Admin 비밀번호 =========="
                             ADMIN_PW=\$(kubectl get secret argocd-initial-admin-secret \
                                 -n ${env.ARGOCD_NAMESPACE} \
                                 -o jsonpath='{.data.password}' | base64 -d)
-                            echo "  Password : \${ADMIN_PW}"
-                            echo "=========================================="
 
                             NODE_IP=\$(kubectl get nodes \
                                 -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
-                            echo ""
-                            echo "========== ArgoCD 접속 정보 ==========="
+                            echo "=========================================="
+                            echo "  ArgoCD 접속 정보"
                             echo "  URL      : http://\${NODE_IP}:${env.ARGOCD_NODEPORT}"
                             echo "  Username : admin"
                             echo "  Password : \${ADMIN_PW}"
-                            echo "========================================"
+                            echo "=========================================="
+
+                            # 이후 Stage에서 사용하기 위해 파일로 저장
+                            echo "\${ADMIN_PW}"   > /tmp/argocd-admin-pw
+                            echo "\${NODE_IP}"    > /tmp/argocd-node-ip
+                        """
+                    }
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────
+        // Stage 6. Register Cluster to ArgoCD
+        //   - ArgoCD CLI를 서버에서 다운로드
+        //   - admin 로그인 후 kubeconfig의 클러스터를 ArgoCD에 등록
+        //   - ArgoCD UI의 Settings → Clusters 에서 등록 목록 확인 가능
+        // ────────────────────────────────────────────────────────
+        stage('Register Cluster to ArgoCD') {
+            steps {
+                script {
+                    withCredentials([file(
+                        credentialsId: env.KUBECONFIG_CRED,
+                        variable: 'KUBECONFIG_PATH'
+                    )]) {
+                        sh """
+                            export KUBECONFIG=\$(pwd)/target-kubeconfig.yaml
+
+                            NODE_IP=\$(cat /tmp/argocd-node-ip | tr -d '\\n')
+                            ADMIN_PW=\$(cat /tmp/argocd-admin-pw | tr -d '\\n')
+                            ARGOCD_SERVER="\${NODE_IP}:${env.ARGOCD_NODEPORT}"
+
+                            echo ">>> ArgoCD CLI 다운로드 (서버에서)..."
+                            curl -sSL -o argocd \
+                                --retry 3 --max-time 60 --insecure \
+                                http://\${ARGOCD_SERVER}/download/argocd-linux-amd64
+                            chmod +x argocd
+
+                            echo ">>> ArgoCD 로그인..."
+                            ./argocd login \${ARGOCD_SERVER} \
+                                --username admin \
+                                --password \${ADMIN_PW} \
+                                --plaintext \
+                                --grpc-web
+
+                            echo ">>> kubeconfig 컨텍스트 목록 확인..."
+                            kubectl config get-contexts --kubeconfig=\${KUBECONFIG_PATH}
+
+                            # kubeconfig의 current-context 이름 추출
+                            CONTEXT_NAME=\$(kubectl config current-context --kubeconfig=\${KUBECONFIG_PATH})
+                            echo ">>> 등록할 클러스터 컨텍스트: \${CONTEXT_NAME}"
+
+                            echo ">>> ArgoCD에 클러스터 등록 중..."
+                            ./argocd cluster add \${CONTEXT_NAME} \
+                                --kubeconfig=\${KUBECONFIG_PATH} \
+                                --plaintext \
+                                --grpc-web \
+                                --yes
+
+                            echo ""
+                            echo "========== ArgoCD 등록된 클러스터 목록 =========="
+                            ./argocd cluster list --plaintext --grpc-web
+                            echo "=================================================="
+
+                            rm -f argocd /tmp/argocd-admin-pw /tmp/argocd-node-ip
                         """
                     }
                 }
             }
         }
     }
+
 
     post {
         always {
