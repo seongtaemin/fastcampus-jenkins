@@ -1,19 +1,17 @@
 pipeline {
-    // ?�떠???�이?�트?�서???�행 가?�함???�현
+    // 어떠한 에이전트에서도 실행 가능함을 표현
     agent any
 
-
-
     environment {
-        // ?�용???�정 반영
+        // 사용자 설정 반영
         HARBOR_URL = 'harbor.kolon.local'
         GITOPS_REPO_URL = 'https://github.com/seongtaemin/3tier-app.git'
         ARGOCD_SERVER = '172.18.229.174:30002'
         
-        // ?�로?�트 �??��?지 ?�정
+        // 프로젝트 및 이미지 설정
         HARBOR_PROJECT = 'library'
         
-        // SonarQube ?�정 (Tool Name)
+        // SonarQube 설정 (Tool Name)
         SONAR_SCANNER_HOME = tool name: 'sonar-scanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
         
         // GitConfig
@@ -42,26 +40,26 @@ pipeline {
                     echo "Harbor URL: ${HARBOR_URL}"
                     echo "ArgoCD Server: ${ARGOCD_SERVER}"
                     
-                    // GitOps 리포지?�리 ?�론
+                    // GitOps 리포지토리 클론
                     sh "rm -rf gitops-repo && git clone ${GITOPS_REPO_URL} gitops-repo"
                     
-                    // 모든 YAML ?�일?�서 image: ??��???��??�으�??�색?�여 ?��?지 ?�름�?버전 추출
-                    // ?�식: "?�일경로|?��?지?�름|버전|?�본?��?지경로" (??줄에 ?�나??
+                    // 모든 YAML 파일에서 image: 항목을 재귀적으로 탐색하여 이미지 이름과 버전 추출
+                    // 형식: "파일경로|이미지이름|버전|원본이미지경로" (한 줄에 하나씩)
                     def imageLines = sh(
                         script: '''
                             find gitops-repo -name "*.yaml" -o -name "*.yml" | while read yamlFile; do
                                 grep -n 'image:' "$yamlFile" | while IFS=: read lineNum lineContent; do
-                                    # image: ?�의 �?추출 (주석 ?�거)
+                                    # image: 뒤의 값 추출 (주석 제거)
                                     imageValue=$(echo "$lineContent" | sed 's/.*image:[[:space:]]*//' | sed 's/#.*//' | tr -d ' "'"'"'')
                                     
-                                    # ?��?지?�름:?�그 ?�식?�서 분리
+                                    # 이미지이름:태그 형식에서 분리
                                     if echo "$imageValue" | grep -q ':'; then
-                                        # ?��??�트�??�로?�트 경로 ?�거 ???�수 ?��?지 ?�름�?추출
+                                        # 레지스트리/프로젝트 경로 제거 후 순수 이미지 이름만 추출
                                         imageFull=$(echo "$imageValue" | rev | cut -d'/' -f1 | rev)
                                         imageName=$(echo "$imageFull" | cut -d':' -f1)
                                         imageTag=$(echo "$imageFull" | cut -d':' -f2)
                                         relPath=$(echo "$yamlFile" | sed 's|^gitops-repo/||')
-                                        # Harbor URL �?docker.io ?�두???�거?�여 ?�본 pull 경로 ?�성
+                                        # Harbor URL 및 docker.io 접두사 제거하여 원본 pull 경로 생성
                                         sourceImage=$(echo "$imageValue" | sed "s|^${HARBOR_URL}/${HARBOR_PROJECT}/||" | sed 's|^docker.io/||')
                                         echo "${relPath}|${imageName}|${imageTag}|${sourceImage}"
                                     fi
@@ -71,21 +69,21 @@ pipeline {
                         returnStdout: true
                     ).trim()
                     
-                    // imageLines�?';' 구분?�로 결합?�여 ?�경변?�에 ?�??
-                    // ?�식: "file1|name1|version1;file2|name2|version2;..."
+                    // imageLines를 ';' 구분자로 결합하여 환경변수에 저장
+                    // 형식: "file1|name1|version1;file2|name2|version2;..."
                     if (!imageLines) {
-                        error "GitOps 리포지?�리?�서 image ??��??찾을 ???�습?�다."
+                        error "GitOps 리포지토리에서 image 항목을 찾을 수 없습니다."
                     }
                     
-                    // 줄바꿈을 ';'�?변?�하???�일 문자?�로 ?�??
+                    // 줄바꿈을 ';'로 변환하여 단일 문자열로 저장
                     env.IMAGE_MAP_STR = imageLines.split('\n').collect { it.trim() }.findAll { it }.join(';')
                     
                     // 결과 출력
-                    echo "========== 발견???��?지 목록 =========="
+                    echo "========== 발견된 이미지 목록 =========="
                     env.IMAGE_MAP_STR.split(';').each { entry ->
                         def parts = entry.split('\\|')
                         if (parts.length == 4) {
-                            echo "  ?�일: ${parts[0]} | ?��?지: ${parts[1]} | 버전: ${parts[2]} | ?�스: ${parts[3]}"
+                            echo "  파일: ${parts[0]} | 이미지: ${parts[1]} | 버전: ${parts[2]} | 소스: ${parts[3]}"
                         }
                     }
                     echo "========================================"
@@ -125,23 +123,23 @@ pipeline {
                             if (parts.length == 4) {
                                 def imgName = parts[1]
                                 def imgVersion = parts[2]
-                                def sourceImage = parts[3]  // ?�본 ?�체 경로 (?? istio/proxyv2:1.23.6)
+                                def sourceImage = parts[3]  // 원본 전체 경로 (예: istio/proxyv2:1.23.6)
                                 def harborTarget = "${HARBOR_URL}/${HARBOR_PROJECT}/${imgName}:${imgVersion}"
-                                echo "=== ${imgName} ?��?지 (${imgVersion}) ==="
+                                echo "=== ${imgName} 이미지 (${imgVersion}) ==="
                                 
-                                // sourceImage??'/'가 ?�는 경우 (?? proxyv2:1.23.6)
-                                // Harbor??library ?�로?�트???�?�할 ???�본 경로(?? istio/)가 ?�실??경우??
-                                // ?�양???�려�??��??�트�??�두?��? ?�도?�여 ?�바�??�스�?찾음
+                                // sourceImage에 '/'가 없는 경우 (예: proxyv2:1.23.6)
+                                // Harbor의 library 프로젝트에 저장할 때 원본 경로(예: istio/)가 손실된 경우임
+                                // 다양한 알려진 레지스트리 접두사를 시도하여 올바른 소스를 찾음
                                 if (!sourceImage.contains('/')) {
-                                    echo "경고: ${sourceImage}???��??�트�?경로가 ?�습?�다. ?�려�??�두?�로 ?�도?�니??"
+                                    echo "경고: ${sourceImage}에 레지스트리 경로가 없습니다. 알려진 접두사로 시도합니다."
                                     def pulled = false
-                                    // ?�려�??�두??목록 (공식 Docker Hub ?��?지???�두???�이 pull 가??
+                                    // 알려진 접두사 목록 (공식 Docker Hub 이미지는 접두사 없이 pull 가능)
                                     def prefixes = ['', 'istio/', 'library/']
                                     for (prefix in prefixes) {
                                         def tryImage = prefix ? "${prefix}${sourceImage}" : sourceImage
                                         def pullResult = sh(script: "docker pull ${tryImage}", returnStatus: true)
                                         if (pullResult == 0) {
-                                            echo "?�공: ${tryImage} ?�서 ?��?지�?가?�왔?�니??"
+                                            echo "성공: ${tryImage} 에서 이미지를 가져왔습니다."
                                             sh """
                                                 docker tag ${tryImage} ${harborTarget}
                                                 docker push ${harborTarget}
@@ -149,11 +147,11 @@ pipeline {
                                             pulled = true
                                             break
                                         } else {
-                                            echo "${tryImage} pull ?�패, ?�음 ?�두???�도..."
+                                            echo "${tryImage} pull 실패, 다음 접두사 시도..."
                                         }
                                     }
                                     if (!pulled) {
-                                        error "?��?지 ${sourceImage}�??�떤 ?�려�??��??�트리에?�도 가?�올 ???�습?�다."
+                                        error "이미지 ${sourceImage}를 어떤 알려진 레지스트리에서도 가져올 수 없습니다."
                                     }
                                 } else {
                                     sh """
@@ -172,7 +170,7 @@ pipeline {
         stage('Approval') {
             steps {
                 script {
-                    // 발견???��?지 목록???�인 메시지???�시
+                    // 발견된 이미지 목록을 승인 메시지에 표시
                     def imageDesc = env.IMAGE_MAP_STR.split(';').collect { entry ->
                         def parts = entry.split('\\|')
                         parts.length == 4 ? "${parts[1]}:${parts[2]}" : ''
@@ -180,9 +178,9 @@ pipeline {
                     
                     def userInput = input(
                         id: 'Deploy', 
-                        message: '배포?�시겠습?�까?', 
+                        message: '배포하시겠습니까?', 
                         parameters: [
-                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: '?��?지 목록: ' + imageDesc, name: 'Proceed']
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: '이미지 목록: ' + imageDesc, name: 'Proceed']
                         ]
                     )
                 }
@@ -205,19 +203,22 @@ pipeline {
                             
                             cd gitops-repo
                             
-                            # 모든 YAML ?�일?�서 namespace 값을 ?�용?��? ?�력??값으�??�괄 변�?
+                            # 환경별 브랜치 체크아웃 (없으면 생성)
+                            git checkout -b deploy-${env.TARGET_NAMESPACE} || git checkout deploy-${env.TARGET_NAMESPACE}
+                            
+                            # 모든 YAML 파일에서 namespace 값을 사용자가 입력한 값으로 일괄 변경
                             find . -name "*.yaml" -o -name "*.yml" | xargs -I {} sed -i 's/^\\([[:space:]]*\\)namespace:.*/\\1namespace: ${env.TARGET_NAMESPACE}/g' {}
                             
-                            # namespace.yaml??metadata.name ??변�?
+                            # namespace.yaml의 metadata.name 도 변경
                             if [ -f namespace.yaml ]; then
                                 sed -i -e '/^metadata:/,/^  name:/ s/^  name:.*/  name: ${env.TARGET_NAMESPACE}/g' namespace.yaml
                             fi
                             
-                            # Istio AuthorizationPolicy ?�의 principals ???�드코딩???�임?�페?�스 경로??변�?
+                            # Istio AuthorizationPolicy 등의 principals 내 하드코딩된 네임스페이스 경로도 변경
                             find . -name "*.yaml" -o -name "*.yml" | xargs -I {} sed -i 's|cluster.local/ns/[^/]*/sa/|cluster.local/ns/${env.TARGET_NAMESPACE}/sa/|g' {}
                         """
                         
-                        // 발견??모든 ?��?지???�??YAML ?�일??image ?�그�?Harbor ?��?지�?변�?
+                        // 발견된 모든 이미지에 대해 YAML 파일의 image 태그를 Harbor 이미지로 변경
                         def changedFilesList = []
                         env.IMAGE_MAP_STR.split(';').each { entry ->
                             def parts = entry.split('\\|')
@@ -233,7 +234,7 @@ pipeline {
                             }
                         }
                         
-                        // 변경된 YAML ?�일 목록 ?�집
+                        // 변경된 YAML 파일 목록 수집
                         def changedFiles = changedFilesList.unique().join(' ')
                         
                         sh """
@@ -255,10 +256,11 @@ data:
 EOF
                             
                             git add . && git add harbor-credentials.yaml
-                            # 변경사??�� ?�을 ?�만 커밋
-                            git diff --quiet && git diff --staged --quiet || git commit -m "Ensure Manifests and Harbor Credentials"
+                            # 변경사항이 있을 때만 커밋
+                            git diff --quiet && git diff --staged --quiet || git commit -m "Deploy to ${env.TARGET_NAMESPACE}"
                             
-                            git push https://\${GIT_USER}:\${GIT_PASSWORD}@github.com/seongtaemin/3tier-app.git HEAD:main
+                            # 변경된 파일들을 타겟 네임스페이스 전용 브랜치로 푸시
+                            git push https://\${GIT_USER}:\${GIT_PASSWORD}@github.com/seongtaemin/3tier-app.git HEAD:deploy-${env.TARGET_NAMESPACE} -f
                         """
                     }
                 }
@@ -269,7 +271,7 @@ EOF
             steps {
                 script {
                     sh """
-                        # ArgoCD CLI ?�운로드 ?�도 (?�버?�서 먼�? ?�도, ?�패 ??GitHub?�서 ?�운로드)
+                        # ArgoCD CLI 다운로드 시도 (서버에서 먼저 시도, 실패 시 GitHub에서 다운로드)
                         curl -sSL -o argocd --retry 3 --retry-delay 5 --max-time 30 https://${ARGOCD_SERVER}/download/argocd-linux-amd64 --insecure || \
                         curl -sSL -o argocd --retry 3 --retry-delay 5 --max-time 60 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
                         chmod +x argocd
@@ -280,7 +282,7 @@ EOF
                         usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')
                     ]) {
                         
-                        // 1. 로그??
+                        // 1. 로그인
                         sh """
                             ./argocd login ${ARGOCD_SERVER} \
                                 --username \${ARGO_USER} \
@@ -289,16 +291,16 @@ EOF
                                 --grpc-web
                         """
 
-                        // 2. ?�러?�터 목록 조회 (?�더 ?�외?�고 �?번째 컬럼??SERVER URL�?추출)
+                        // 2. 클러스터 목록 조회 (헤더 제외하고 첫 번째 컬럼인 SERVER URL만 추출)
                         def clusters = sh(
                             script: "./argocd cluster list --plaintext --grpc-web | awk 'NR>1 {print \$1}'", 
                             returnStdout: true
                         ).trim().tokenize('\n')
 
-                        // 3. ?�용?�에�?배포???�러?�터 �??�임?�페?�스 ?�택 ?�청
+                        // 3. 사용자에게 배포할 클러스터 및 네임스페이스 선택 요청
                         def userInput = input(
                             id: 'SelectClusterAndNamespace',
-                            message: '배포??Kubernetes ?�러?�터?� ?�임?�페?�스�??�력?�세??',
+                            message: '배포할 Kubernetes 클러스터와 네임스페이스를 입력하세요:',
                             parameters: [
                                 choice(name: 'DEST_SERVER', choices: clusters, description: 'Target Kubernetes Cluster URL')
                             ]
@@ -311,11 +313,11 @@ EOF
                         echo "Target Namespace: ${targetNamespace}"
 
 
-                        // 4. ?�택???�러?�터 �??�임?�페?�스�????�성 �?배포
+                        // 4. 선택된 클러스터 및 네임스페이스로 앱 생성 및 배포
                         sh """
                             ./argocd app create ${APP_NAME} \
                                 --repo ${GITOPS_REPO_URL} \
-                                --revision main \
+                                --revision deploy-${targetNamespace} \
                                 --path . \
                                 --dest-server ${selectedCluster} \
                                 --dest-namespace ${targetNamespace} \
