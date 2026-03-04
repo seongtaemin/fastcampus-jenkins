@@ -61,8 +61,8 @@ pipeline {
                                         imageName=$(echo "$imageFull" | cut -d':' -f1)
                                         imageTag=$(echo "$imageFull" | cut -d':' -f2)
                                         relPath=$(echo "$yamlFile" | sed 's|^gitops-repo/||')
-                                        # docker.io/ 접두사 제거한 pull 가능한 원본 경로 생성
-                                        sourceImage=$(echo "$imageValue" | sed 's|^docker.io/||')
+                                        # Harbor URL 및 docker.io 접두사 제거하여 원본 pull 경로 생성
+                                        sourceImage=$(echo "$imageValue" | sed "s|^${HARBOR_URL}/${HARBOR_PROJECT}/||" | sed 's|^docker.io/||')
                                         echo "${relPath}|${imageName}|${imageTag}|${sourceImage}"
                                     fi
                                 done
