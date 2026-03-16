@@ -1,0 +1,179 @@
+def processItem(item, foundImages) {
+    if (item.newName && item.newTag) {
+        foundImages << "${item.newName}:${item.newTag}"
+    } else if (item.newName) {
+        foundImages << item.newName
+    } else if (item.name && item.name.contains('/')) {
+        // newName이 없을 때 원본 name을 가져가되, 태그가 있는 경우만 안전하게 수집
+        if (item.newTag) {
+            foundImages << "${item.name}:${item.newTag}"
+        } else if (item.name.contains(':')) {
+            foundImages << item.name
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    environment {
+        HARBOR_URL = 'harbor.kolon.local'
+        HARBOR_PROJECT = 'kubeflow'
+    }
+
+    stages {
+        stage('Initialize & Scan Images') {
+            steps {
+                script {
+                    def userInput = input(
+                        message: 'Enter Source Repository to Scan', 
+                        parameters: [
+                            string(defaultValue: 'https://github.com/seongtaemin/kubeflow.git', description: 'GitHub Repository URL', name: 'SOURCE_REPO_URL')
+                        ]
+                    )
+                    env.SOURCE_REPO_URL = userInput
+                    
+                    echo "Cloning ${env.SOURCE_REPO_URL} to scan for images..."
+                    sh "rm -rf target-repo && git clone ${env.SOURCE_REPO_URL} target-repo"
+                    
+                    echo "Scanning YAML files for images..."
+                    def rawOutput = sh(
+                        script: "grep -rE '(image|newName|newTag|name|repository|tag):' target-repo --exclude-dir=.git || true",
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (!rawOutput) {
+                        error "검색된 이미지가 없습니다. 레포지토리에 YAML 파일이 있는지 확인하세요."
+                    }
+                    
+                    def foundImages = [] as Set
+                    def currentItem = [:] 
+                    
+                    rawOutput.split('\n').each { line ->
+                        try {
+                            def colonIdx = line.indexOf(':')
+                            if (colonIdx <= 0) return
+                            
+                            def file = line.substring(0, colonIdx).trim()
+                            def content = line.substring(colonIdx + 1).trim()
+                            
+                            // [수정] Helm values.yaml 호환을 위해 repository, tag 추가
+                            def matcher = (content =~ /(-?\s*)\b(image|newName|newTag|name|repository|tag)\b\s*:\s*(.*)/)
+                            if (matcher.find()) {
+                                def key = matcher.group(2)
+                                def val = matcher.group(3).replaceAll("['\"\\s]", "").split('#')[0]
+                                // [수정] Helm 템플릿 변수 필터링 ({{...}}, $... 등 제외)
+                                if (!val || val.contains('{{') || val.contains('}}') || val.contains('$') || val.contains('.Values')) return
+
+                                if (!currentItem[file]) currentItem[file] = [:]
+                                
+                                if (key == 'image') {
+                                    // image 필드는 태그가 없어도 수집 (latest 시도)
+                                    foundImages << val
+                                } else if (key == 'name' || key == 'repository' || key == 'newName') {
+                                    // 새로운 이미지 블록 설정
+                                    if (currentItem[file].newName || currentItem[file].newTag || currentItem[file].name) {
+                                        processItem(currentItem[file], foundImages)
+                                    }
+                                    // repository와 newName은 동일하게 처리
+                                    if (key == 'name') currentItem[file] = [name: val]
+                                    else currentItem[file] = [newName: val]
+                                } else if (key == 'newTag' || key == 'tag') {
+                                    currentItem[file].newTag = val
+                                    processItem(currentItem[file], foundImages)
+                                    currentItem[file] = [:]
+                                }
+                            }
+                        } catch (Exception e) {
+                            echo "Error parsing line: ${line} - ${e.message}"
+                        }
+                    }
+                    
+                    currentItem.each { f, item -> processItem(item, foundImages) }
+
+                    if (foundImages.isEmpty()) {
+                        error "유효한 이미지를 찾을 수 없습니다."
+                    }
+                    
+                    def resultLines = []
+                    foundImages.each { fullImg ->
+                        if (!fullImg || !fullImg.contains('/')) return 
+                        def parts = fullImg.split('/')
+                        def nameAndTag = parts[-1]
+                        def name, tag
+                        if (nameAndTag.contains(':')) {
+                            def nt = nameAndTag.split(':', 2)
+                            name = nt[0]
+                            tag = nt[1]
+                        } else {
+                            name = nameAndTag
+                            tag = 'latest'
+                        }
+                        resultLines << "${fullImg}|${name}|${tag}"
+                    }
+                    
+                    env.IMAGE_LIST_STR = resultLines.join(';')
+                    
+                    echo "========== 발견된 이미지 목록 (${foundImages.size()}개) =========="
+                    env.IMAGE_LIST_STR.split(';').each { entry ->
+                        def parts = entry.split('\\|')
+                        if (parts.length == 3) {
+                            echo "  [FOUND] ${parts[0]}  ==>  [TARGET] ${HARBOR_URL}/${HARBOR_PROJECT}/${parts[1]}:${parts[2]}"
+                        }
+                    }
+                    echo "========================================"
+                }
+            }
+        }
+
+        stage('Mirror to Harbor') {
+            steps {
+                script {
+                    def summaryLines = []
+                    withCredentials([usernamePassword(credentialsId: 'harbor-credentials', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASSWORD')]) {
+                        sh "docker login ${HARBOR_URL} -u \${HARBOR_USER} -p \${HARBOR_PASSWORD}"
+                        
+                        env.IMAGE_LIST_STR.split(';').each { entry ->
+                            def parts = entry.split('\\|')
+                            if (parts.length == 3) {
+                                def sourceImage = parts[0]
+                                def targetName = parts[1]
+                                def targetTag = parts[2]
+                                def targetFull = "${HARBOR_URL}/${HARBOR_PROJECT}/${targetName}:${targetTag}"
+                                
+                                try {
+                                    echo ">>> Processing image: ${sourceImage}"
+                                    sh "docker pull ${sourceImage}"
+                                    sh "docker tag ${sourceImage} ${targetFull}"
+                                    sh "docker push ${targetFull}"
+                                    summaryLines << "[성공] ${sourceImage}  ==>  ${targetFull}"
+                                } catch (Exception e) {
+                                    echo "!!! Failed to process ${sourceImage}"
+                                    summaryLines << "[실패] ${sourceImage}  ==>  (이유: ${e.message.take(50)}...)"
+                                }
+                            }
+                        }
+                    }
+                    env.FINAL_SUMMARY = summaryLines.join('\n')
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo """
+================================================================================
+💠 IMAGE MIRRORING FINAL SUMMARY 💠
+================================================================================
+${env.FINAL_SUMMARY ?: '처리된 이미지가 없습니다.'}
+================================================================================
+작업이 완료되었습니다.
+"""
+                sh "docker logout ${HARBOR_URL}"
+                sh "rm -rf target-repo"
+            }
+        }
+    }
+}
